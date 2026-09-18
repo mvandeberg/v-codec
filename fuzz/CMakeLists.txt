@@ -1,6 +1,6 @@
-# §13.4 fuzzing. Three harnesses exposing LLVMFuzzerTestOneInput. With Clang they build
-# against libFuzzer; with GCC (which has no libFuzzer) they build against fuzz/standalone_main.cpp,
-# a driver that replays the seed corpus and mutates it for a time budget. Both build with
+# §13.4 fuzzing. Harnesses expose LLVMFuzzerTestOneInput. With Clang they build against
+# libFuzzer; with GCC (which has no libFuzzer) they build against fuzz/standalone_main.cpp, a
+# driver that replays the seed corpus and mutates it for a time budget. Both build with
 # ASan+UBSan.
 set(VCODEC_FUZZ_SECONDS 60 CACHE STRING "seconds per harness for the ctest fuzz run")
 
@@ -29,3 +29,9 @@ endfunction()
 vcodec_add_fuzzer(fuzz_skip)
 vcodec_add_fuzzer(fuzz_typed)
 vcodec_add_fuzzer(fuzz_roundtrip)
+if(VCODEC_BUILD_CBOR)
+    vcodec_add_fuzzer(fuzz_cbor_skip)
+    vcodec_add_fuzzer(fuzz_cbor_typed)
+    vcodec_add_fuzzer(fuzz_cbor_roundtrip)
+    vcodec_add_fuzzer(fuzz_cbor_deterministic)
+endif()

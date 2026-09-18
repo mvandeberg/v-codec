@@ -598,9 +598,11 @@ status decode_struct(R& r, T& out, std::string_view ignore_key = {}) {
             if (!kt) return fail(std::move(kt));
             key = kt->text;
             idx = lut.find(key);
-            // A member keyed by an integer under this format takes its text name only when
-            // the format says so (cbor::text_key_alias).
-            if constexpr (ikeys.any()) { if (idx != npos && ikeys.keys[idx].present && !ikeys.keys[idx].text_ok) idx = npos; }
+            // A member keyed by an integer under this format takes its text *name* only when
+            // the format says so (cbor::text_key_alias); explicit aliases are always accepted.
+            if constexpr (ikeys.any()) {
+                if (idx != npos && ikeys.keys[idx].present && !ikeys.keys[idx].text_ok && key == schema[idx].wire_name.view()) idx = npos;
+            }
         }
 
         if (idx == npos) {

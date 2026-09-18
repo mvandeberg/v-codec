@@ -958,3 +958,38 @@ v0.2 ships when all of these hold:
 What v0.2 **does** promise: RFC 8949 conformance, deterministic output stable across
 versions for the same type and value, no crash or UB on hostile input, diagnostics as
 specified, and JSON behaviour byte-identical to v0.1.
+
+---
+
+## 17. Implementation notes — where v0.2.0 as shipped differs from this document
+
+Recorded at release so the specification and the code can be read together. Each entry
+names the section it amends. `docs/cbor.md` describes the shipped behaviour and is
+authoritative where the two disagree.
+
+| § | Specified | Shipped | Why |
+|---|---|---|---|
+| 3.3 | `peek_tag()` reader hook | Not provided. Tags are consumed by `expect_tags` (core, from `expected_tags<F, T>`) or by `expect_bignum` / a user codec's `expect_tags` call; `peek()` skips tags it is about to ignore | No caller needed it once `expected_tags` was consteval |
+| 3.3 / 7.4 | `write_prepared<T>` whole-value fast path | Hook exists in the traversal, neither writer implements it | Benchmarks did not justify it; kept as an extension point |
+| 5.1 | `float_width(half)` on a value that does not round-trip is `encode_error(out_of_range)` | Values inside half range are **rounded to nearest** (`core::to_half_rounded`); only values at or beyond ±65520 throw `out_of_range` | A pinned width is a request for a wire shape, and a producer asking for 16-bit floats expects rounding, not a throw on 0.1 |
+| 5.1 / 5.2 | `cbor::tag(n)` is field-level; type-level tagging via `transparent` | Also accepted directly on a struct type: the tag precedes the struct's map wherever the type appears | The `transparent` idiom still works; the direct form is shorter and has one obvious meaning |
+| 5.1 | `alias` is honoured on CBOR decode only when the map key is text | As specified; additionally an `alias` on an integer-keyed member is treated as an explicit text alias even without `text_key_alias` | Writing `alias("x")` is already an explicit request to accept text |
+| 5.2 | `integer_keys` allocation skips explicit keys | As specified. `integer_keys` on a type that is `flatten`ed into another, or that has `flatten` members, is the specified compile error (`test/compile_fail/cbor_integer_keys_flatten.cpp`) | — |
+| 5.4 | Tags 21–23 (expected conversion) are "ignored" | Treated as *unknown* tags: skipped under `ignore_unknown_tags` (default), `tag_mismatch` when that option is off | They carry no information for a typed decoder |
+| 7.2 | Under `deterministic = false`, struct members are emitted in declaration order | Struct members are always emitted in the consteval canonical order (`member_order`), in both modes | One permutation computed at compile time, no runtime branch; non-deterministic byte layout is not promised (§16) |
+| 7.2 | Duplicate keys in a runtime map under deterministic encoding | Detected at `end_map` after the sort and thrown as `encode_error(errc::duplicate_key)` | A canonical encoding of a map with duplicate keys does not exist |
+| 7.3 | NaN encodes as `f9 7e00` *under deterministic mode* | `f9 7e00` in both modes; payloads are never preserved | Simplest rule; no user of NaN payloads exists in scope |
+| 8 | `key_order` option enum with `canonical` | Not shipped. Length-first ordering remains open question 7 | No use yet |
+| 8.1 | Chunked (indefinite-length) text decoded into `std::string_view` is `indefinite_in_borrowed_string` | Text views report `errc::escape_in_borrowed_string` with the suggestion `use std::string instead of std::string_view`; byte spans report `indefinite_in_borrowed_string` | Core's text path cannot tell an escaped JSON string from a chunked CBOR one — both arrive as "not borrowed" — and the fix for the user is the same |
+| 8.1 | Simple values | `f8 xx` with `xx < 32` is `malformed_item` (RFC 8949 §3.3), so the Appendix A vector `f818` is expected to be *rejected*; 0–19 and 32–255 decode as `unsupported_simple_value` unless a codec calls `expect_simple` | RFC 8949 tightened this relative to RFC 7049 |
+| 8.2 | `require_deterministic` details: `integer 5 encoded in 2 bytes; shortest form is 1`, `1 encoded as double; preferred form is half`, `key 4 precedes key 2`, `duplicate key 2` | `detail()` / `suggestion()` pairs: `integer 5 encoded in 2 bytes` / `shortest form is 1 byte`; `float encoded as double` / `preferred form is half`; `map keys out of canonical order` / `key 2 precedes key 4`; `duplicate map key` / `key 2 repeats`. Additionally `NaN not encoded as f97e00` | Splitting detail from suggestion matches the JSON errors; the NaN check exists because the writer can only ever emit that form |
+| 8.2 | Key order is checked as keys are read | Checked in the map cursor's `next()` for keys of **any** kind (the key's extent comes from a validating skip), and independently in `skip_value` | The first implementation checked only through the integer/text key accessors, which a custom codec can bypass; the fuzzers found it |
+| 8.3 | Missing required member renders `'issuer' (cbor key 1)` | `missing field 'issuer' (key 1)` | Shorter; the renderer already says the format |
+| 8.3 | Non-text, non-integer key while decoding a struct | `errc::type_mismatch` with `expected` = `integer key` / `text key` | No dedicated code was warranted |
+| 7.1 | Sink surface | The CBOR writer additionally exposes `negative(n)` (−1−n below `INT64_MIN`), `simple(v)` and `begin_key()` / `end_key()` (a key of any type, for custom codecs); the reader exposes `expect_nint`, `expect_bignum`, `expect_simple` | Needed by the test DOM and by codecs for bignums and COSE-style keys |
+| 6 | `reflectable_class` | `std::chrono` time points and durations are excluded from reflection in every format, so under JSON they have no codec (compile error) rather than encoding their private members | A struct dump of `sys_seconds` is never what anyone wants |
+| 13.4 | Fuzzers | Four CBOR harnesses ship; the standalone driver now saves the failing input to `crash-<pid>` on an oracle failure, and every oracle names itself (`VCODEC_FUZZ_CHECK`) | Reproducibility without libFuzzer |
+| 15 Q8 | Test DOM | `test/support/dom.hpp` grew `uint64`, `int64`, `big_negative`, `simple`, `int_object` (integer keys) and `any_object` (keys of any other kind) alternatives, so every well-formed CBOR item has a DOM form; still test-only | Needed for Appendix A, transcoding and the deterministic oracle |
+
+Everything else in §§1–14 shipped as written; §14 items 1–15 hold (item 8 with the
+150-second local runs recorded in CHANGELOG and the one-hour nightly job in CI).

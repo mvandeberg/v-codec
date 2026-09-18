@@ -162,6 +162,9 @@ TEST_CASE("cbor decode: structs with integer keys, text keys, and aliases") {
     struct Alias { [[=cb::key(1), =cb::text_key_alias]] int a = 0; };
     CHECK(ok<Alias>("a1" "6161" "05").a == 5);
     CHECK(ok<Alias>("a1" "01" "06").a == 6);
+    struct Aliased { [[=cb::key(1), =vcodec::alias("legacy")]] int a = 0; };
+    CHECK(ok<Aliased>("a1" "666c65676163" "79" "07").a == 7);      // an explicit alias is always accepted
+    CHECK(ok<Aliased>("a1" "6161" "05").a == 0);                  // the bare name still is not
     // unknown integer key under deny renders with the key
     auto unk = err<StrictDeny>("a1" "09" "05");
     CHECK(unk.code() == vcodec::errc::unknown_field);
@@ -248,9 +251,11 @@ TEST_CASE("cbor decode: well-formedness errors") {
     CHECK(err<int>("1c").code() == vcodec::errc::malformed_item);
     CHECK(err<int>("ff").code() == vcodec::errc::malformed_item);
     CHECK(err<std::vector<int>>("82ff01").code() == vcodec::errc::malformed_item);
-    CHECK(err<int>("f0").code() == vcodec::errc::unsupported_simple_value);       // simple 16
-    CHECK(err<int>("f820").code() == vcodec::errc::unsupported_simple_value);     // simple 32 (two-byte form)
-    CHECK(err<int>("f810").code() == vcodec::errc::unsupported_simple_value);     // simple 16 in two bytes: ill-formed
+    auto sv = err<int>("f0");                                                     // simple 16: well-formed, no target type
+    CHECK(sv.code() == vcodec::errc::type_mismatch);
+    CHECK(sv.found() == "simple value 16");
+    CHECK(err<int>("f820").found() == "simple value 32");                         // two-byte form
+    CHECK(err<int>("f810").code() == vcodec::errc::malformed_item);               // RFC 8949 §3.3: two-byte simple below 32 is ill-formed
     CHECK(err<int>("0102").code() == vcodec::errc::trailing_content);
     auto tc = err<int>("0102");
     CHECK(tc.offset() == 1);

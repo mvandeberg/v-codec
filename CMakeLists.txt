@@ -1,5 +1,5 @@
 cmake_minimum_required(VERSION 3.28)
-project(vcodec VERSION 0.1.0 LANGUAGES CXX)
+project(vcodec VERSION 0.2.0 LANGUAGES CXX)
 
 add_library(vcodec INTERFACE)
 add_library(vcodec::vcodec ALIAS vcodec)

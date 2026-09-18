@@ -90,6 +90,9 @@ template<class T, class Format>
 consteval void audit_struct(audit_state& st, std::string const& path) {
     constexpr auto& ti = type_schema_of<T>;
     if (!ti.ok()) { st.fail(str(ti.error.view())); return; }
+    constexpr auto& kt = key_table_of<T, Format>;
+    if (!kt.ok()) { st.fail(str(kt.error.view())); return; }
+    if (auto m = format_traits<Format>::template check_type<T>(); !m.empty()) { st.fail(path + " " + m); return; }
     template for (constexpr auto f : fields_of<T>) {
         if (st.failed()) return;
         constexpr field_info fi = f.info;

@@ -60,6 +60,14 @@ void call_bytes(S& s, std::span<const std::byte> b) {
     if constexpr (requires { s.template bytes<F>(b); }) s.template bytes<F>(b); else s.bytes(b);
 }
 template<field_meta F, sink S>
+void call_begin_array(S& s, std::optional<std::size_t> n) {
+    if constexpr (requires { s.template begin_array<F>(n); }) s.template begin_array<F>(n); else s.begin_array(n);
+}
+template<field_meta F, sink S>
+void call_begin_map(S& s, std::optional<std::size_t> n) {
+    if constexpr (requires { s.template begin_map<F>(n); }) s.template begin_map<F>(n); else s.begin_map(n);
+}
+template<field_meta F, sink S>
 void call_real(S& s, double d) {
     if constexpr (requires { s.template real<F>(d); }) s.template real<F>(d); else s.real(d);
 }
@@ -267,7 +275,7 @@ template<field_meta F, sink S, class R>
 void encode_sequence(S& s, R const& r) {
     std::optional<std::size_t> n;
     if constexpr (std::ranges::sized_range<R>) n = std::ranges::size(r);
-    s.begin_array(n);
+    call_begin_array<F>(s, n);
     std::uint64_t i = 0;
     for (auto const& e : r) {
         with_index_path(i, [&] { encode_value<F>(s, e); });
@@ -280,7 +288,7 @@ template<field_meta F, sink S, map_like M>
 void encode_map(S& s, M const& m) {
     std::optional<std::size_t> n;
     if constexpr (std::ranges::sized_range<M>) n = std::ranges::size(m);
-    s.begin_map(n);
+    call_begin_map<F>(s, n);
     for (auto const& kv : m) {
         auto const& k = std::get<0>(kv);
         auto const& val = std::get<1>(kv);

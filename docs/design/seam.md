@@ -75,10 +75,50 @@ bytes and integer keys are native in CBOR and need lowerings in JSON, definite a
 indefinite lengths land where core's knowledge says they should, and encode-side failures
 name members identically in both formats.
 
+## What CBOR proper changed (v0.2)
+
+The spike is gone; `include/vcodec/cbor/` is a full backend that drives the same traversal
+as JSON. Making it real pushed a second set of changes into `core/`, all of them optional
+hooks or traits with a default, so the JSON writer and reader compiled unchanged:
+
+1. **`format_traits` grew a query surface** (`core/model.hpp`, `format_traits_defaults`):
+   `integer_key<F>` and `accepts_text_key<F>` (which wire key a member has),
+   `member_order<T>(n)` (a consteval permutation, so deterministic CBOR emits struct members
+   in canonical byte order with no runtime sort), `expected_tags<F, T>` (which semantic tags
+   wrap a member's value), `bulk_range<F, R>` / `accepts_bulk_range<R>` (typed arrays),
+   `enum_default_integer`, `bytes_borrowable`, and `check_field<F, M>` / `check_type<T>` so a
+   format can veto a member or type with its own compile-time message. Core evaluates all of
+   them once, consteval, into `key_table_of<T, Format>`, `member_order_of<T, Format>` and
+   `expected_tags_of<F, T, Format>` (`core/keys.hpp`).
+2. **The sink gained optional members**: `prepared_key<std::int64_t Key>`,
+   `begin_map_ordered(n)`, `write_range<F>(r)`, and field-aware `real<F>`, `text<F>`,
+   `begin_array<F>`, `begin_map<F>` beside the v0.1 `uint<F>` / `sint<F>` / `bytes<F>`. The
+   reader gained `expect_tags(span)`, `read_range<F>(out)`, and `start()` / `finish()` so a
+   self-describe tag and trailing content are the reader's business.
+3. **Struct decoding has an integer-key branch** (`core/build.hpp`): the key's kind picks the
+   table; the text name of an integer-keyed member is accepted only when the format says so
+   (`accepts_text_key`, or an explicit `alias`). Path steps stay in member terms, so a COSE
+   claim with key 1 renders as `$.iss`. A missing required member re-scans the present keys
+   to say which were there.
+4. **Conditional members are pre-counted**, so a struct with `skip_if_null` members still
+   gets a definite map length; the v0.1 `nullopt` path is now taken only for unsized runtime
+   ranges. Tagged variants use the sorting `begin_map`, because the discriminator is spliced
+   in at runtime and cannot be part of the consteval order.
+5. **`codec_for` may be field-aware**: `encode<F>` / `decode<F>` overloads receive the
+   member's meta, which is how `std::chrono::sys_time` reads its `cbor::tag(0)` versus
+   `tag(1)` choice.
+6. **What is reflectable is a core decision**: `std::chrono` types are excluded from
+   `reflectable_class` in every format rather than dumped member by member.
+
+What a third format would find already there: byte strings, integer keys, tags, bulk ranges,
+canonical ordering, and per-format compile-time vetoes. What it would probably add is the
+next thing MessagePack needs — extension types — which would arrive the same way, as an
+optional hook with a default.
+
 ## What did not leak
 
 - The schema layer (`fields_of`, `schema_of`, `lookup_of`) has no format in it at all.
-- Error paths are in C++ member terms on both sides; a future CBOR integer key will render
-  as `$.issuer`, not `$.1`, because field identity is the member, not the wire key.
+- Error paths are in C++ member terms on both sides; a CBOR integer key renders as
+  `$.issuer`, not `$.1`, because field identity is the member, not the wire key.
 - Compile-time diagnostics are produced by one audit parameterised on the format; the JSON
   messages come from JSON's `format_traits` hints, not from core text.

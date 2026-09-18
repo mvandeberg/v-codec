@@ -6,8 +6,11 @@ Decoding failures are values, not exceptions: every decode entry point returns a
 a type that compiles, except for a small set of runtime facts that throw
 `vcodec::encode_error` ([below](#encode-side-failures)).
 
-Everything on this page is declared in `<vcodec/error.hpp>` except `render_framed`, which
-lives in `<vcodec/json/render_error.hpp>`. Both are included by `<vcodec/json.hpp>`.
+Everything on this page is declared in `<vcodec/error.hpp>` except the two format
+renderers: `render_framed` lives in `<vcodec/json/render_error.hpp>` (included by
+`<vcodec/json.hpp>`) and `render_hex` in `<vcodec/cbor/render_error.hpp>` (included by
+`<vcodec/cbor.hpp>`). The `error` type, the codes, the paths and `render_terse` are shared
+by both formats.
 
 ## The error type
 
@@ -67,7 +70,8 @@ constexpr bool is_syntax_error(errc) noexcept;
 
 `error` is a handle to a heap-allocated block, so `result<T>` stays small on the success path;
 copies are deep. `position()` is an `std::optional` because binary formats have no line and
-column: the JSON reader always sets it, computed from the offset. Which of the extended
+column: the JSON reader always sets it, computed from the offset; **the CBOR reader never
+does**, and `offset()` is the byte offset of the offending item's head. Which of the extended
 accessors are populated depends on the code; the table under
 [Renderers](#renderers) says which the framed renderer uses.
 
@@ -83,13 +87,28 @@ enum class errc : std::uint16_t {
     out_of_range, unknown_enumerator, no_variant_alternative, missing_tag,
     // policy: valid and well-typed, but a rule of the call forbids it
     escape_in_borrowed_string, non_text_key,
+    // v0.2, CBOR: syntax
+    malformed_item, unsupported_simple_value,
+    // v0.2, CBOR: schema
+    tag_mismatch,
+    // v0.2, CBOR: policy
+    non_deterministic, indefinite_in_borrowed_string,
 };
 ```
 
-The three groups matter for recovery. `is_syntax_error(c)` is true for the first group; a
-syntax error means the reader's position is meaningless and nothing after it can be trusted,
-so [`decode_all`](#collect-all-decode_all) stops there. Schema and policy errors leave the
-reader positioned at a known value, which is what makes member-granularity recovery possible.
+The three groups matter for recovery. `is_syntax_error(c)` is true for the first group and
+for the two CBOR syntax codes; a syntax error means the reader's position is meaningless and
+nothing after it can be trusted, so [`decode_all`](#collect-all-decode_all) stops there.
+Schema and policy errors leave the reader positioned at a known value, which is what makes
+member-granularity recovery possible.
+
+The CBOR reader produces most of the JSON codes too, with CBOR vocabulary in `expected()` /
+`found()` (`unsigned integer`, `negative integer`, `float`, `text string`, `byte string`,
+`array`, `map`, `boolean`, `null`, `undefined`, `simple value`): `truncated`, `invalid_utf8`,
+`trailing_content`, `depth_exceeded`, every schema code, and `escape_in_borrowed_string`
+(for a chunked text string into a `std::string_view`). It never produces
+`unexpected_token`, `unterminated_string`, `invalid_escape`, `invalid_number` or
+`non_text_key`. The five new codes are described [below](#cbor-codes).
 
 ## Paths
 
@@ -126,15 +145,21 @@ the member's wire name is in `detail()` and the object's start in `container_off
 
 ## Renderers
 
-Both are free functions in namespace `vcodec` and neither consults the input except to cut an
-excerpt; render however you like from the accessors if these do not suit.
+All three are free functions in namespace `vcodec` and none consults the input except to
+cut an excerpt; render however you like from the accessors if these do not suit.
 
 ```cpp
-std::string render_terse(error const& e);                             // one line
-std::string render_framed(error const& e, std::string_view input);    // multi-line with excerpt
+std::string render_terse(error const& e);                                // one line, any format
+std::string render_framed(error const& e, std::string_view input);       // multi-line with a text excerpt (JSON)
+std::string render_hex(error const& e, std::span<const std::byte> input); // multi-line with a hex window (CBOR)
 ```
 
-`render_terse`: `error: <headline> at <path> (byte offset <N>)`.
+`render_terse`: `error: <headline> at <path> (byte offset <N>)`. It works for either format.
+
+`render_framed` on a CBOR error prints the headline and path and no excerpt (there is no
+text to cut); `render_hex` on a JSON error would decode JSON bytes as CBOR heads, so use the
+renderer of the format that produced the error. Both share the code-specific lines below and
+differ only in the excerpt.
 
 `render_framed`: the headline, a `-->` line with the path, then code-specific lines:
 
@@ -147,6 +172,11 @@ std::string render_framed(error const& e, std::string_view input);    // multi-l
 | everything else | a source excerpt with a caret line (only when `input` is non-empty), then `suggestion()` if set |
 
 Pass an empty `input` when the buffer is gone; the excerpt is simply omitted.
+
+Two headline details are CBOR-specific: `missing_field` appends `(key N)` when the member has
+an integer key, and `unknown_field` for an unknown integer key renders the key in the path
+(`$[9]`). Under `render_hex`, `missing_field` and `missing_tag` show `map has N entries, keys
+present: …` instead of `object begins at …`; see [The hex window](#the-hex-window).
 
 ### The excerpt window
 
@@ -166,6 +196,38 @@ That is why the §9.4 example reads the same for compact and pretty-printed inpu
 
 Did-you-mean is Levenshtein distance ≤ 2 against the type's wire names, computed only on the
 error path.
+
+### The hex window
+
+`render_hex` replaces the text excerpt with a 16-byte window, aligned to a 16-byte boundary so
+that the offending item's head byte falls inside it:
+
+```
+error: expected text string, found unsigned integer
+  --> $.users[3].name
+   |
+   |  0000_0050:  …a3 62 69 64 07 64 6e 61 6d 65 18 2a 65 65 6d 61 …
+   |                                             ^^ ^^
+   |                                             major type 0 (unsigned integer), value 42
+```
+
+- The address column is the window's start offset as eight hex digits, underscore-grouped.
+  `…` before or after the bytes marks input outside the window.
+- Carets cover the head byte and as many payload bytes as `length()` reports, within the
+  window (`18 2a` is a two-byte head; a text string's carets run over its payload).
+- The description line decodes the head at `offset()`: `major type N (name), value V` for
+  integers, `length L` for strings, `N elements` / `N entries` for containers,
+  `indefinite length`, `tag N (name)` with IANA names for the tags the library knows,
+  `false` / `true` / `null` / `undefined`, `half-precision float` (and single, double),
+  `simple value N`, `reserved additional information N`, and `break` for `0xff`.
+- `suggestion()`, when set, follows the window as its own `|` line.
+
+The code-specific lines match `render_framed` (`did you mean`, `expected one of`, nothing for
+`out_of_range`), with three additions: `missing_field` / `missing_tag` print
+`map has N entries, keys present: 2, 4, 7` (integer keys as numbers, text keys quoted; the
+list is collected by re-scanning the map on the error path only); `tag_mismatch` prints
+`expected …, found …`; `non_deterministic` prints `suggestion()`. Pass an empty span to omit
+the window.
 
 ## One example per code
 
@@ -475,13 +537,140 @@ error: string contains escapes but S::v borrows from the input
 ```
 
 **`non_text_key`** — a format delivered a non-text map key where a text key was required.
-The JSON reader never produces it, since every JSON key is text (integral keys for
-`stringify_keys` maps arrive as strings and are parsed); it exists for binary formats whose
-readers can hand back integer keys. A reader that produces it sets `found()`; rendered:
+Neither shipped reader produces it: every JSON key is text (integral keys for
+`stringify_keys` maps arrive as strings and are parsed), and the CBOR reader reports an
+integer key where a `std::map<std::string, …>` expects text as `type_mismatch`
+(`expected text string, found unsigned integer`), a boolean key likewise
+(`expected text string, found boolean`). The code remains for a reader that hands back
+integer keys through `key_uint()` where the target has no way to take them. A reader that
+produces it sets `found()`; rendered:
 
 ```
 error: expected text key, found integer
   --> $.by_id
+```
+
+### CBOR codes
+
+Five codes exist only for CBOR. Each example gives the input bytes, the type, and the exact
+`render_hex` output with the input passed. The first three are asserted byte for byte by
+`test/cbor/errors.cpp`; the other two are produced the same way from the inputs shown.
+
+**`malformed_item`** (syntax) — the bytes are not well-formed CBOR: additional information
+28–30 in a head, a break byte (`ff`) outside an indefinite-length item or after a map key, a
+tag with no content, an indefinite-length string whose chunk is not a definite-length string
+of the same major type, or an RFC 8746 typed array whose byte length is not a multiple of the
+element size. `detail()` names which.
+
+```cpp
+std::vector<int> v;
+```
+```
+input: 83 01 1c 02
+
+error: malformed item: reserved additional information
+  --> $[1]
+   |
+   |  0000_0000:   83 01 1c 02
+   |                     ^^
+   |                     major type 0 (unsigned integer), reserved additional information 28
+```
+
+Other details: `break outside an indefinite-length item` (`82 01 ff` into a vector, at
+`$[1]`), `break after a map key`, `tag with no content` (`9f c1 ff`),
+`indefinite-length string chunk must be a definite-length string of the same type`
+(`7f 41 01 ff` into a string), `typed array length is not a multiple of the element size`.
+
+**`unsupported_simple_value`** (syntax) — major type 7 with a simple value outside 20–23
+(`false`, `true`, `null`, `undefined`): `f0`…`f3`, `f8 xx`, and the two-byte encoding of a
+value below 32, which RFC 8949 forbids. `detail()` is the value.
+
+```cpp
+int n;
+```
+```
+input: f0
+
+error: unsupported simple value 16
+  --> $
+   |
+   |  0000_0000:   f0
+   |               ^^
+   |               major type 7 (simple/float), simple value 16
+```
+
+**`tag_mismatch`** (schema) — the tags before a value are not the ones the member requires
+(`cbor::tag(n)`, or tag 1 for a time point): a different tag, a missing tag, or, with
+`options::ignore_unknown_tags = false`, a tag where none is expected. `expected()` and
+`found()` are in tag vocabulary with IANA names for known tags; `found()` is `no tag` when
+the value is bare; `context()` is the member.
+
+```cpp
+struct Event { [[=vcodec::cbor::tag(1)]] std::int64_t issued_at = 0; };
+```
+```
+input: a1 69 6973737565645f6174 c0 1a 514b67b0        {"issued_at": 0("…")}
+
+error: tag mismatch on 'issued_at'
+  --> $.issued_at
+   |  expected tag 1 (epoch datetime), found tag 0 (RFC 3339 string)
+```
+
+With unknown tags not ignored, `d8 2a 05` for an untagged member renders
+`expected no tag, found tag 42`. A user codec's `expect_bignum()` on a non-bignum reports
+`expected tag 2 or 3 (bignum)`.
+
+**`non_deterministic`** (policy) — RFC 8949 §4.2.1 violated on input while
+`options::require_deterministic` is on, or the top-level type carries
+`cbor::deterministic`, which forces the check and appends the type to the suggestion.
+`detail()` names the violation (`integer 5 encoded in 2 bytes`, `indefinite-length array`,
+`indefinite-length text string`, `float encoded as double`, `map keys out of canonical order`,
+`duplicate map key`), `suggestion()` the fix (`shortest form is 1 byte`,
+`deterministic encoding requires definite lengths`, `preferred form is half`,
+`key 2 precedes key 4`, `key 2 repeats`). The offset is the offending item, or the offending
+key.
+
+```cpp
+struct [[=vcodec::cbor::deterministic]] Signed { [[=vcodec::cbor::key(2)]] int a = 0; [[=vcodec::cbor::key(4)]] int b = 0; };
+```
+```
+input: a2 04 01 02 02        {4: 1, 2: 2}
+
+error: non-deterministic encoding: map keys out of canonical order
+  --> $
+   |  key 2 precedes key 4; Signed is declared [[=cbor::deterministic]]
+```
+
+Under the option alone, on a member `claims` of that shape, the path localises it and no
+type is named:
+
+```
+error: non-deterministic encoding: map keys out of canonical order
+  --> $.claims
+   |  key 2 precedes key 4
+```
+
+Duplicate keys are `non_deterministic` in this mode under every `duplicates` policy.
+
+**`indefinite_in_borrowed_string`** (policy) — a `std::span<const std::byte>` member met an
+indefinite-length (chunked) byte string. The span can only alias the input, and the chunks
+are assembled in reader scratch. `context()` is the member, `suggestion()` the fix. (A
+chunked *text* string into a `std::string_view` reuses `escape_in_borrowed_string`, whose
+meaning — assembled text cannot be borrowed — is the same.)
+
+```cpp
+struct B { std::span<const std::byte> b; };
+```
+```
+input: a1 61 62 5f 41 de ff        {"b": (_ h'de')}
+
+error: indefinite-length string but B::b borrows from the input
+  --> $.b
+   |
+   |  0000_0000:   a1 61 62 5f 41 de ff
+   |                        ^^
+   |                        major type 2 (byte string), indefinite length
+   |  use std::vector<std::byte> instead of std::span<const std::byte>
 ```
 
 ## Collect-all: `decode_all`
@@ -561,17 +750,20 @@ public:
 | nesting deeper than `max_depth`, typically a cycle through smart pointers | `depth_exceeded` | `nesting depth exceeds max_depth (256); a cycle through smart pointers is the usual cause` |
 | a string that is not valid UTF-8, with `validate_utf8` on | `invalid_utf8` | `string contains invalid UTF-8 at byte 4` |
 | a `std::variant` that is `valueless_by_exception` | `no_variant_alternative` | `variant is valueless_by_exception` |
+| CBOR: a string that is not valid UTF-8, with `validate_utf8` on | `invalid_utf8` | `text string contains invalid UTF-8 at byte 0` |
+| CBOR: two entries of a runtime map with identical encoded keys under `deterministic` | `duplicate_key` | `deterministic encoding forbids duplicate map keys` |
+| CBOR: `cbor::float_width(half)` / `(single)` on a magnitude the width cannot hold | `out_of_range` | `value 1e+05 does not fit a half-precision float ([[=cbor::float_width(half)]])` |
 
 The path is built by the same unwind rule as decode errors, so a skipped enumerator inside
-`rows[1].c` reports the steps `rows`, `1`, `c`. There is no framed renderer for
-`encode_error` (there is no input to excerpt); render the path with the same rules as above
-if needed.
+`rows[1].c` reports the steps `rows`, `1`, `c`, in every format (`test/cross/consistency.cpp`
+asserts it for JSON and CBOR). There is no framed renderer for `encode_error` (there is no
+input to excerpt); render the path with the same rules as above if needed.
 
 ## Producing errors from a custom codec
 
 A codec's `decode` receives the reader and can fail with any `errc`. Build the error through
-the reader's factory so it carries the offset and position, then add what the renderer will
-need:
+the reader's factory so it carries the offset and, for text formats, the position, then add
+what the renderer will need:
 
 ```cpp
 static auto decode(vcodec::core::reader auto& r) -> vcodec::result<my::Rgb> {

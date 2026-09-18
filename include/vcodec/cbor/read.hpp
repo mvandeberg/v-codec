@@ -15,6 +15,7 @@
 #include <vcodec/error.hpp>
 
 #include <bit>
+#include <cmath>
 #include <cstring>
 #include <string>
 #include <vector>
@@ -109,6 +110,21 @@ public:
         }
         return std::unexpected(type_error("integer", *h));
     }
+    // An unassigned simple value (0–19, 32–255) for user codecs; the model has no kind for them.
+    result<std::uint8_t> expect_simple() {
+        auto h = item_head("simple value");
+        if (!h) return std::unexpected(std::move(h.error()));
+        if (h->mt != major::simple || (h->ai >= 20 && h->ai <= 23) || (h->ai >= 25 && h->ai <= 27))
+            return std::unexpected(type_error("simple value", *h));
+        pos_ += h->length; return static_cast<std::uint8_t>(h->value);
+    }
+    // The raw argument n of a negative integer (value = -1 - n), for values below INT64_MIN.
+    result<std::uint64_t> expect_nint() {
+        auto h = item_head("negative integer");
+        if (!h) return std::unexpected(std::move(h.error()));
+        if (h->mt != major::nint) return std::unexpected(type_error("negative integer", *h));
+        pos_ += h->length; return h->value;
+    }
     result<double> expect_real() {
         auto h = item_head("float");
         if (!h) return std::unexpected(std::move(h.error()));
@@ -119,7 +135,7 @@ public:
                      : h->ai == 26 ? double(std::bit_cast<float>(static_cast<std::uint32_t>(h->value)))
                                    : std::bit_cast<double>(h->value);
             if constexpr (Opts.require_deterministic) {
-                if (auto e = check_preferred_float(d, h->ai)) return std::unexpected(std::move(*e));
+                if (auto e = check_preferred_float(d, h->ai, h->value)) return std::unexpected(std::move(*e));
             }
             pos_ += h->length; return d;
         }
@@ -207,46 +223,61 @@ public:
                 if (*remaining_ == 0) { --r_->depth_; return false; }
                 --*remaining_;
                 if (r_->pos_ >= r_->in_.size()) return std::unexpected(r_->error(errc::truncated, r_->pos_).with_expected("map key"));
-                return true;
+                return key_ahead();
             }
             if (r_->pos_ >= r_->in_.size()) return std::unexpected(r_->error(errc::truncated, r_->pos_).with_expected("map key or break"));
             if (r_->in_[r_->pos_] == std::byte(break_byte)) { ++r_->pos_; --r_->depth_; return false; }
-            return true;
+            return key_ahead();
         }
         core::kind key_kind() const noexcept {
             auto k = r_->peek();
             return k;
         }
-        result<core::text_ref> key_text() { std::size_t s = r_->pos_; auto k = r_->expect_text(); if (k) if (auto e = key_done(s)) return std::unexpected(std::move(*e)); return k; }
-        result<std::uint64_t> key_uint() { std::size_t s = r_->pos_; auto k = r_->expect_uint(); if (k) if (auto e = key_done(s)) return std::unexpected(std::move(*e)); return k; }
-        result<std::int64_t>  key_sint() { std::size_t s = r_->pos_; auto k = r_->expect_sint(); if (k) if (auto e = key_done(s)) return std::unexpected(std::move(*e)); return k; }
+        result<core::text_ref> key_text() { return r_->expect_text(); }
+        result<std::uint64_t> key_uint() { return r_->expect_uint(); }
+        result<std::int64_t>  key_sint() { return r_->expect_sint(); }
         std::optional<std::size_t> remaining() const noexcept { return remaining_; }
-        // Determinism: keys must be strictly increasing in bytewise order of their encoding.
-        std::optional<vcodec::error> order_error;
     private:
         reader* r_; std::optional<std::size_t> remaining_;
         std::size_t prev_start_ = 0, prev_end_ = 0; bool have_prev_ = false;
-        std::optional<vcodec::error> key_done(std::size_t start) {
+        // Determinism: keys must be strictly increasing in bytewise order of their encoding,
+        // whatever their kind and however the caller goes on to decode them. The key's extent
+        // comes from a validating skip over a saved position; a malformed key is left for the
+        // caller's decode to report.
+        result<bool> key_ahead() {
             if constexpr (Opts.require_deterministic) {
-                auto cur = r_->in_.subspan(start, r_->pos_ - start);
-                std::optional<vcodec::error> out;
-                if (have_prev_) {
-                    auto prev = r_->in_.subspan(prev_start_, prev_end_ - prev_start_);
-                    auto lt = [](std::byte x, std::byte y) { return std::to_integer<unsigned>(x) < std::to_integer<unsigned>(y); };
-                    bool less = std::lexicographical_compare(cur.begin(), cur.end(), prev.begin(), prev.end(), lt);
-                    bool equal = std::ranges::equal(cur, prev);
-                    if (less || equal) {
-                        out = r_->error(errc::non_deterministic, start)
-                            .with_detail(equal ? "duplicate map key" : "map keys out of canonical order")
-                            .with_suggestion("key " + r_->diag(cur) + (equal ? " repeats" : " precedes key " + r_->diag(prev)))
-                            .with_length(r_->pos_ - start);
-                    }
-                }
-                prev_start_ = start; prev_end_ = r_->pos_; have_prev_ = true;
-                return out;
-            } else { (void)start; return std::nullopt; }
+                std::size_t start = r_->pos_;
+                auto saved = r_->save();
+                auto skipped = r_->skip_value();
+                std::size_t end = r_->pos_;
+                r_->restore(saved);
+                if (!skipped) return true;
+                if (auto e = check_key_order(start, end)) return std::unexpected(std::move(*e));
+            }
+            return true;
+        }
+        std::optional<vcodec::error> check_key_order(std::size_t start, std::size_t end) {
+            auto cur = r_->in_.subspan(start, end - start);
+            std::optional<vcodec::error> out;
+            if (have_prev_) {
+                auto prev = r_->in_.subspan(prev_start_, prev_end_ - prev_start_);
+                out = reader::key_order_error(r_, cur, prev, start);
+            }
+            prev_start_ = start; prev_end_ = end; have_prev_ = true;
+            return out;
         }
     };
+
+    static std::optional<vcodec::error> key_order_error(const reader* r, std::span<const std::byte> cur, std::span<const std::byte> prev, std::size_t start) {
+        auto lt = [](std::byte x, std::byte y) { return std::to_integer<unsigned>(x) < std::to_integer<unsigned>(y); };
+        bool less = std::lexicographical_compare(cur.begin(), cur.end(), prev.begin(), prev.end(), lt);
+        bool equal = std::ranges::equal(cur, prev);
+        if (!less && !equal) return std::nullopt;
+        return r->error(errc::non_deterministic, start)
+            .with_detail(equal ? "duplicate map key" : "map keys out of canonical order")
+            .with_suggestion("key " + r->diag(cur) + (equal ? " repeats" : " precedes key " + r->diag(prev)))
+            .with_length(cur.size());
+    }
 
     result<seq_cursor> expect_array() {
         auto h = item_head("array");
@@ -290,10 +321,17 @@ public:
 
     // ---- generic validator ----
     status skip_value() {
-        struct level { bool is_map; std::optional<std::uint64_t> remaining; bool key_next; };
+        struct level {
+            bool is_map; std::optional<std::uint64_t> remaining; bool key_next;
+            // deterministic mode: extent of the key being parsed and of the previous key
+            std::size_t key_start = 0, prev_start = 0, prev_end = 0; bool in_key = false, have_prev = false;
+        };
         std::vector<level> stack;
         for (;;) {
             if (pos_ >= in_.size()) return std::unexpected(error(errc::truncated, pos_));
+            if constexpr (Opts.require_deterministic) {
+                if (!stack.empty() && stack.back().is_map && stack.back().key_next && !stack.back().in_key) { stack.back().key_start = pos_; stack.back().in_key = true; }
+            }
             auto h = parse_head(in_, pos_);
             if (!h.length) return std::unexpected(error(errc::truncated, pos_));
             if (h.is_break) {
@@ -307,13 +345,12 @@ public:
             switch (h.mt) {
             case major::uint: case major::nint: pos_ += h.length; break;
             case major::simple:
-                if (h.ai >= 24 && h.ai < 25 && h.value < 32) return std::unexpected(error(errc::unsupported_simple_value, pos_).with_detail(std::to_string(h.value)).with_length(2));
-                if (h.ai < 20 || h.ai == 24) return std::unexpected(error(errc::unsupported_simple_value, pos_).with_detail(std::to_string(h.value)).with_length(h.length));
+                if (h.ai == 24 && h.value < 32) return std::unexpected(error(errc::malformed_item, pos_).with_detail("two-byte simple value below 32").with_length(2));
                 if constexpr (Opts.require_deterministic) {
                     if (h.ai >= 25) {
                         double d = h.ai == 25 ? core::from_half(static_cast<std::uint16_t>(h.value))
                                  : h.ai == 26 ? double(std::bit_cast<float>(static_cast<std::uint32_t>(h.value))) : std::bit_cast<double>(h.value);
-                        if (auto e = check_preferred_float(d, h.ai)) return std::unexpected(std::move(*e));
+                        if (auto e = check_preferred_float(d, h.ai, h.value)) return std::unexpected(std::move(*e));
                     }
                 }
                 pos_ += h.length; break;
@@ -351,6 +388,14 @@ public:
         item_done:
             if (stack.empty()) return {};
             auto& top = stack.back();
+            if constexpr (Opts.require_deterministic) {
+                if (top.is_map && top.key_next) {
+                    auto cur = in_.subspan(top.key_start, pos_ - top.key_start);
+                    if (top.have_prev)
+                        if (auto e = key_order_error(this, cur, in_.subspan(top.prev_start, top.prev_end - top.prev_start), top.key_start)) return std::unexpected(std::move(*e));
+                    top.prev_start = top.key_start; top.prev_end = pos_; top.have_prev = true; top.in_key = false;
+                }
+            }
             if (top.is_map) top.key_next = !top.key_next;
             if (top.remaining) {
                 if (--*top.remaining == 0) { --depth_; stack.pop_back(); goto item_done; }
@@ -419,9 +464,7 @@ private:
                 return std::unexpected(error(errc::tag_mismatch, p).with_expected("no tag").with_found(tag_text(h.value)).with_length(h.length));
             }
             if (h.mt == major::simple && h.ai == 24 && h.value < 32)
-                return std::unexpected(error(errc::unsupported_simple_value, p).with_detail(std::to_string(h.value)).with_length(2));
-            if (h.mt == major::simple && (h.ai < 20 || (h.ai == 24 && h.value >= 32)))
-                return std::unexpected(error(errc::unsupported_simple_value, p).with_detail(std::to_string(h.value)).with_length(h.length));
+                return std::unexpected(error(errc::malformed_item, p).with_detail("two-byte simple value below 32").with_length(2));
             if constexpr (Opts.require_deterministic) { if (auto e = check_head_deterministic(h, p)) return std::unexpected(std::move(*e)); }
             pos_ = p; start_ = p;
             return h;
@@ -444,7 +487,7 @@ private:
             if (h.ai == 22) return "null";
             if (h.ai == 23) return "undefined";
             if (h.ai >= 25 && h.ai <= 27) return "float";
-            return "simple value";
+            return "simple value " + std::to_string(h.value);
         }
         return std::string(major_name(h.mt));
     }
@@ -476,7 +519,13 @@ private:
         return std::nullopt;
     }
     std::optional<vcodec::error> check_head_deterministic(parsed_head const& h) const { return check_head_deterministic(h, pos_); }
-    std::optional<vcodec::error> check_preferred_float(double d, std::uint8_t ai) const {
+    std::optional<vcodec::error> check_preferred_float(double d, std::uint8_t ai, std::uint64_t raw) const {
+        if (std::isnan(d)) {
+            // RFC 8949 §4.2.2: a deterministic protocol picks one NaN; this library emits 0xf97e00.
+            if (ai == 25 && raw == 0x7e00) return std::nullopt;
+            return error(errc::non_deterministic, pos_).with_detail("NaN not encoded as f97e00")
+                .with_suggestion("deterministic encoding uses the canonical half NaN").with_length(std::size_t(1) + (ai == 25 ? 2 : ai == 26 ? 4 : 8));
+        }
         std::uint8_t need = core::to_half(d) ? 25 : core::fits_single(d) ? 26 : 27;
         if (ai == need) return std::nullopt;
         auto name = [](std::uint8_t a) { return a == 25 ? "half" : a == 26 ? "single" : "double"; };
@@ -510,6 +559,15 @@ private:
             if (c.value > in_.size() - pos_ - c.length)
                 return std::unexpected(error(errc::truncated, pos_).with_expected(std::to_string(c.value) + " string bytes").with_length(c.length));
             auto span = in_.subspan(pos_ + c.length, static_cast<std::size_t>(c.value));
+            if constexpr (Opts.validate_utf8) {
+                // RFC 8949 §3.2.3: every chunk of an indefinite-length text string must itself be
+                // well-formed UTF-8; a character cannot be split across chunks.
+                if (expected_major == major::text) {
+                    std::string_view t(reinterpret_cast<const char*>(span.data()), span.size());
+                    if (std::size_t bad = core::validate_utf8(t); bad != core::utf8_npos)
+                        return std::unexpected(error(errc::invalid_utf8, pos_ + c.length + bad).with_length(1));
+                }
+            }
             scratch.insert(scratch.end(), span.begin(), span.end());
             pos_ += c.length + static_cast<std::size_t>(c.value);
         }

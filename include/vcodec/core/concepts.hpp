@@ -7,6 +7,7 @@
 #include <vcodec/core/compiler.hpp>
 
 #include <array>
+#include <chrono>
 #include <concepts>
 #include <cstddef>
 #include <cstdint>
@@ -180,6 +181,13 @@ constexpr void insert_into(M& m, K&& k, V&& v) {
     else m.insert(std::pair{std::move(k), std::move(v)});
 }
 
+// ---- std::chrono: never reflected into (a codec provides the representation, or nothing) ----
+
+template<class T> struct is_chrono : std::false_type {};
+template<class C, class D> struct is_chrono<std::chrono::time_point<C, D>> : std::true_type {};
+template<class R, class P> struct is_chrono<std::chrono::duration<R, P>> : std::true_type {};
+template<class T> concept chrono_type = is_chrono<bare<T>>::value;
+
 // ---- classes ----------------------------------------------------------------------------
 
 // Anything that is a class and not one of the standard shapes above is traversed by
@@ -187,7 +195,7 @@ constexpr void insert_into(M& m, K&& k, V&& v) {
 template<class T> concept class_type = std::is_class_v<bare<T>> && !std::is_union_v<bare<T>>;
 
 template<class T> concept reflectable_class =
-    class_type<T> && !string_like<T> && !wide_string<T> && !optional_like<T> && !variant_like<T> && !tuple_like<T>
+    class_type<T> && !string_like<T> && !wide_string<T> && !chrono_type<T> && !optional_like<T> && !variant_like<T> && !tuple_like<T>
     && !byte_like<T> && !contiguous_of_uint8<T> && !map_like<T> && !fixed_array<T> && !span_like<T>
     && !sequence<T> && !std::ranges::input_range<bare<T>>;
 

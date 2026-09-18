@@ -24,11 +24,12 @@ error. The other documents are reference material:
 
 | Document | Contents |
 |---|---|
+| [cbor.md](cbor.md) | The CBOR format: wire shapes, deterministic encoding, integer keys, tags, typed arrays, `render_hex` |
 | [annotations.md](annotations.md) | Every annotation: placement, effect on encode and decode, defaults, interactions |
 | [types.md](types.md) | The supported type set, category by category, with the concept that admits each |
 | [errors.md](errors.md) | The `error` type, both renderers, one example per error code, collect-all |
 | [customization.md](customization.md) | `codec_for`, `describe`, `with<Codec>`, custom sinks and readers, new formats |
-| [compatibility.md](compatibility.md) | Toolchain requirements and what v0.1 does and does not promise |
+| [compatibility.md](compatibility.md) | Toolchain requirements and what v0.2 does and does not promise |
 | [design/performance.md](design/performance.md) — what is optimised and the recorded baseline
 - [design/data-model.md](design/data-model.md) | The format-neutral data model the traversal speaks |
 | [design/m0-spellings.md](design/m0-spellings.md) | Verified reflection spellings and where the implementation departs from the spec |
@@ -77,8 +78,9 @@ Clang). Nothing is compiled; the target only adds flags to yours.
 
 | Header | Provides |
 |---|---|
-| `<vcodec/json.hpp>` | JSON encode/decode, the annotation vocabulary, `codec_for`, `describe`, the error type and both renderers. Almost every program needs only this. |
-| `<vcodec/vcodec.hpp>` | Everything, including the `core/` traversal headers, for writing sinks, readers and formats. |
+| `<vcodec/json.hpp>` | JSON encode/decode, the annotation vocabulary, `codec_for`, `describe`, the error type, `render_terse` and `render_framed`. A JSON-only program needs only this. |
+| `<vcodec/cbor.hpp>` | CBOR encode/decode, the `cbor::` vocabulary, the time-point codecs and `render_hex` ([cbor.md](cbor.md)). |
+| `<vcodec/vcodec.hpp>` | Everything, including both formats, the `vcodec::cbor_only` / `json_only` concepts and the `core/` traversal headers, for writing sinks, readers and formats. |
 | `<vcodec/core/annotations.hpp>` | Only the annotation vocabulary, for headers that declare types but never encode them. |
 
 ## A worked example
@@ -337,4 +339,5 @@ The audit is also available as concepts (`vcodec::json::encodable<T>`,
 - A member type is rejected, or you need a type you do not own to work:
   [types.md](types.md) then [customization.md](customization.md).
 - Reporting errors to users: [errors.md](errors.md).
-- What can change between v0.1 and v0.2: [compatibility.md](compatibility.md).
+- The same type as CBOR, with integer keys and tags: [cbor.md](cbor.md).
+- What can change after v0.2: [compatibility.md](compatibility.md).

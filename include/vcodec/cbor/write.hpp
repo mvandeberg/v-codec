@@ -55,7 +55,20 @@ public:
     }
     void key(std::uint64_t k)  { key_start(); head(major::uint, k); key_end(); }
     void key(std::int64_t k)   { key_start(); if (k >= 0) head(major::uint, std::uint64_t(k)); else head(major::nint, std::uint64_t(-1 - k)); key_end(); }
+    // A map key of any type, for custom codecs: write exactly one value between the two calls.
+    // Deterministic mode sorts it bytewise with the rest.
+    void begin_key() { key_start(); }
+    void end_key()   { key_end(); }
     void tag(std::uint64_t t)  { head(major::tag, t); }   // not an item: it prefixes one
+    // A negative integer by its raw argument (value = -1 - n), reaching below INT64_MIN.
+    void negative(std::uint64_t n) { item(); head(major::nint, n); }
+    // An unassigned simple value (0–19, 32–255).
+    void simple(std::uint8_t v) {
+        if ((v >= 20 && v <= 31))
+            throw encode_error(errc::unsupported_simple_value, "simple value " + std::to_string(v) + " is reserved or has its own representation");
+        item();
+        if (v < 24) put(std::uint8_t(0xE0 | v)); else { put(0xF8); put(v); }
+    }
 
     // ---- hooks ----
     template<core::field_meta F>
@@ -90,6 +103,16 @@ public:
             }
             put(break_byte);
         } else bytes(b);
+    }
+    template<core::field_meta F>
+    void begin_array(std::optional<std::size_t> n) {
+        if constexpr (core::has_annotation<indefinite_t>(F.anns()) && !Opts.deterministic) { item(); open(major::array, std::nullopt, false); }
+        else begin_array(n);
+    }
+    template<core::field_meta F>
+    void begin_map(std::optional<std::size_t> n) {
+        if constexpr (core::has_annotation<indefinite_t>(F.anns()) && !Opts.deterministic) { item(); open(major::map, std::nullopt, true); }
+        else begin_map(n);
     }
     // A struct's members arrive in canonical order: no buffering, even when deterministic.
     void begin_map_ordered(std::optional<std::size_t> n) {
@@ -263,10 +286,17 @@ static_assert(core::sink<writer<>>);
 
 namespace detail {
 
+consteval options with_type_determinism_encode(options o, bool det) {
+    if (det) { o.deterministic = true; o.indefinite = false; }
+    return o;
+}
+
 template<options Opts = {}, class T>
 void encode_append(T const& v, std::vector<std::byte>& out) {
-    if constexpr (Opts.self_describe || wants_self_describe<T>) append_head(out, major::tag, self_describe_tag);
-    writer<Opts> w(out);
+    // A [[=cbor::deterministic]] type is canonical whatever the call's options say.
+    constexpr options O = with_type_determinism_encode(Opts, is_deterministic_type<T>);
+    if constexpr (O.self_describe || wants_self_describe<T>) append_head(out, major::tag, self_describe_tag);
+    writer<O> w(out);
     core::encode(w, v);
 }
 

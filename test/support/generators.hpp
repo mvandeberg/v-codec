@@ -5,6 +5,7 @@
 #include <vcodec/core/concepts.hpp>
 #include <vcodec/core/schema.hpp>
 
+#include <chrono>
 #include <cmath>
 #include <cstdint>
 #include <limits>
@@ -75,10 +76,19 @@ F gen_floating(rng& g) {
 
 } // namespace detail
 
+namespace detail {
+template<class T> struct is_sys_time : std::false_type {};
+template<class D> struct is_sys_time<std::chrono::sys_time<D>> : std::true_type {};
+}
+
 template<class T>
 T generate(rng& g) {
     using namespace vcodec::core;
-    if constexpr (boolean_type<T>) return g.coin();
+    if constexpr (detail::is_sys_time<T>::value) {
+        // Years 1970..2106 so RFC 3339 text and epoch numbers both represent the value exactly.
+        return std::chrono::time_point_cast<typename T::duration>(std::chrono::sys_seconds(std::chrono::seconds(g.below(std::uint64_t(1) << 32))));
+    }
+    else if constexpr (boolean_type<T>) return g.coin();
     else if constexpr (byte_type<T>) return std::byte(g.next());
     else if constexpr (char_type<T>) return char('a' + g.below(26));
     else if constexpr (integral_type<T>) return detail::gen_integral<T>(g);
@@ -169,7 +179,8 @@ T generate(rng& g) {
 template<class T>
 bool equal(T const& a, T const& b) {
     using namespace vcodec::core;
-    if constexpr (floating_type<T>) return (std::isnan(a) && std::isnan(b)) || a == b;
+    if constexpr (detail::is_sys_time<T>::value) return a == b;
+    else if constexpr (floating_type<T>) return (std::isnan(a) && std::isnan(b)) || a == b;
     else if constexpr (boolean_type<T> || char_type<T> || integral_type<T> || enum_type<T> || string_like<T>) return a == b;
     else if constexpr (optional_like<T>) {
         if (!a || !b) return !a && !b;

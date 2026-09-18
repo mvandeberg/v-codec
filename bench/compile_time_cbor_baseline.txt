@@ -1,0 +1,9 @@
+# Compile-time baseline for bench/compile_time_cbor.cpp: median wall-clock seconds of 3 runs.
+# Recorded 2026-09-18 on 12 core 12th Gen Intel(R) Core(TM) i7-1260P (16 logical cores), Linux 7.1.9-arch1-2
+# Compiler: c++ (GCC) 16.2.1 20260810
+# Flags: -std=c++26 -freflection -O2 -I/home/michael/git/v-codec/include -c
+# Re-record with: cmake -DRECORD=ON ... -P bench/CompileTimeBudget.cmake (see file header)
+# First recording (v0.2). Recorded back-to-back with compile_time_baseline.txt under the same
+# load (see the note there); the CBOR TU is 1.27x the JSON TU. An include-only <vcodec/cbor.hpp>
+# TU takes 1.48 s. Verification run: median 7.495 s (-3.8%).
+7.794

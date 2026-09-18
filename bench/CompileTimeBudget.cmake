@@ -92,8 +92,9 @@ if(RECORD)
     string(REGEX REPLACE "\n.*" "" cxxver "${cxxver}")
     string(TIMESTAMP when "%Y-%m-%d" UTC)
     string(REPLACE ";" " " flags_str "${FLAGS}")
+    get_filename_component(source_name "${SOURCE}" NAME)
     file(WRITE "${BASELINE}"
-        "# Compile-time baseline for bench/compile_time.cpp: median wall-clock seconds of ${RUNS} runs.\n"
+        "# Compile-time baseline for bench/${source_name}: median wall-clock seconds of ${RUNS} runs.\n"
         "# Recorded ${when} on ${cpu} (${cores} logical cores), ${os} ${osver}\n"
         "# Compiler: ${cxxver}\n"
         "# Flags: ${flags_str} -c\n"

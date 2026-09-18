@@ -4,4 +4,5 @@ vcodec_add_test(test_cbor SOURCES
     decode.cpp
     deterministic.cpp
     tags.cpp
-    errors.cpp)
+    errors.cpp
+    diagnose.cpp)

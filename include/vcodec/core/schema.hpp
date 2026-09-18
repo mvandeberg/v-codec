@@ -174,6 +174,8 @@ consteval std::vector<char> qualified_type_name(std::meta::info t) {
         { "std::basic_string<char16_t>", "std::u16string" },
         { "std::__cxx11::basic_string<char32_t>", "std::u32string" },
         { "std::basic_string<char32_t>", "std::u32string" },
+        { "std::__cxx11::", "std::" },
+        { "std::chrono::_V2::", "std::chrono::" },
         { "> >", ">>" },
     };
     for (std::size_t i = 0; i < ds.size();) {

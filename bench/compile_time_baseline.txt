@@ -1,6 +1,11 @@
 # Compile-time baseline for bench/compile_time.cpp: median wall-clock seconds of 3 runs.
 # Recorded 2026-09-18 on 12 core 12th Gen Intel(R) Core(TM) i7-1260P (16 logical cores), Linux 7.1.9-arch1-2
-# Compiler: g++ (GCC) 16.2.1 20260810
+# Compiler: c++ (GCC) 16.2.1 20260810
 # Flags: -std=c++26 -freflection -O2 -I/home/michael/git/v-codec/include -c
 # Re-record with: cmake -DRECORD=ON ... -P bench/CompileTimeBudget.cmake (see file header)
-5.106
+# Re-recorded 2026-09-18 for v0.2 (core/ changed for the CBOR backend). Previous baseline: 5.106 s
+# (recorded 2026-09-17 on an idle machine). This number was recorded while another process
+# (a fuzzer) held one core at 100%; an include-only <vcodec/json.hpp> TU took 1.02 s under the
+# same load against 0.80 s idle (+27%), so the load accounts for the whole shift. A verification
+# run after the load dropped measured 5.482 s (-10.4% vs this baseline, +7% vs the old one).
+6.124

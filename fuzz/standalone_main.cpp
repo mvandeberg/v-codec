@@ -4,6 +4,7 @@
 // abort the process, which is what the ctest job checks. Not a substitute for libFuzzer's
 // coverage guidance; it exists so the harnesses run under ASan+UBSan on the primary toolchain.
 #include <chrono>
+#include <csignal>
 #include <cstdint>
 #include <cstdio>
 #include <cstdlib>
@@ -13,9 +14,29 @@
 #include <string>
 #include <vector>
 
+#include <unistd.h>
+
 extern "C" int LLVMFuzzerTestOneInput(const std::uint8_t* data, std::size_t size);
 
 namespace {
+
+// The input under test, dumped to crash-<pid> when an oracle aborts (libFuzzer does the same).
+const std::uint8_t* current_data = nullptr;
+std::size_t current_size = 0;
+
+void on_abort(int) {
+    char name[64];
+    std::snprintf(name, sizeof name, "crash-%ld", long(getpid()));
+    if (FILE* f = std::fopen(name, "wb")) { if (current_size) std::fwrite(current_data, 1, current_size, f); std::fclose(f); }
+    std::fprintf(stderr, "standalone fuzz driver: input saved to %s (%zu bytes)\n", name, current_size);
+    std::signal(SIGABRT, SIG_DFL);
+    std::raise(SIGABRT);
+}
+
+int run_one(const std::uint8_t* data, std::size_t size) {
+    current_data = data; current_size = size;
+    return LLVMFuzzerTestOneInput(data, size);
+}
 
 struct rng {
     std::uint64_t s = 0x9E3779B97F4A7C15ull;
@@ -84,9 +105,10 @@ int main(int argc, char** argv) {
         }
     }
     std::fprintf(stderr, "standalone fuzz driver: %zu seeds, max_total_time=%.0fs runs=%ld\n", seeds.size(), max_time, runs);
+    std::signal(SIGABRT, on_abort);
     long executed = 0;
-    for (auto const& s : seeds) { LLVMFuzzerTestOneInput(s.data(), s.size()); ++executed; }
-    if (seeds.empty()) { std::uint8_t z = 0; LLVMFuzzerTestOneInput(&z, 0); ++executed; }
+    for (auto const& s : seeds) { run_one(s.data(), s.size()); ++executed; }
+    if (seeds.empty()) { std::uint8_t z = 0; run_one(&z, 0); ++executed; }
 
     rng r;
     auto start = std::chrono::steady_clock::now();
@@ -95,7 +117,7 @@ int main(int argc, char** argv) {
     while ((runs < 0 || executed < runs) && (max_time <= 0 ? executed < 10000 : elapsed() < max_time)) {
         buf = seeds.empty() ? std::vector<std::uint8_t>{} : seeds[r.below(seeds.size())];
         mutate(buf, r, seeds);
-        LLVMFuzzerTestOneInput(buf.data(), buf.size());
+        run_one(buf.data(), buf.size());
         ++executed;
     }
     std::fprintf(stderr, "standalone fuzz driver: %ld executions in %.1fs, no crash\n", executed, elapsed());

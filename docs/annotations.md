@@ -2,9 +2,12 @@
 
 Annotations are C++26 P3394 attributes of the form `[[=value]]`, where `value` is a
 constant expression of a structural type. vcodec's vocabulary lives in namespace `vcodec`
-(format-neutral) and `vcodec::json` (JSON lowerings). Everything here is declared by
-`<vcodec/core/annotations.hpp>` and `<vcodec/json/annotations.hpp>`; both are included by
-`<vcodec/json.hpp>`.
+(format-neutral, meaning the same in every format), `vcodec::json` (JSON lowerings) and
+`vcodec::cbor` (CBOR protocol intent: integer keys, tags, determinism). They are declared by
+`<vcodec/core/annotations.hpp>`, `<vcodec/json/annotations.hpp>` and
+`<vcodec/cbor/annotations.hpp>`; `<vcodec/json.hpp>` and `<vcodec/cbor.hpp>` each include
+the core vocabulary plus their own. A format ignores the other format's namespace: a type
+can carry both `json::bytes` and `cbor::key` and encode correctly under each.
 
 ## Placement
 
@@ -56,10 +59,21 @@ supplied out of line for a type you do not own, with identical semantics, throug
 | `deny_unknown_fields` | type | no effect | unknown key is `errc::unknown_field` |
 | `transparent` | type (one member) | encodes as its single member | decodes from it |
 | `tag("s")` | type or variant member | discriminator key for `std::variant` members | same |
-| `as_integer` | enum type | enumerators as their underlying integer | same |
+| `as_integer` | enum type, or member | enumerators as their underlying integer | same |
+| `as_text` | enum type, or member | enumerators as their text, where the format default is the integer (CBOR) | same |
 | `json::bytes(enc)` | member (byte-like) | required lowering: `base64`, `base64url`, `hex` | same |
 | `json::as_string` | member (integer) | integer written as a JSON string | accepts string or number |
 | `json::stringify_keys` | member (map with integral keys) | keys written as decimal strings | keys parsed as decimal |
+| `cbor::key(n)` | member | integer `n` as the map key instead of the wire name | accepts the integer only |
+| `cbor::text_key_alias` | member (with an integer key) | no effect | also accepts the wire name and aliases as a text key |
+| `cbor::integer_keys` | type | members without `cbor::key` get keys 1, 2, … in declaration order, skipping taken values | same |
+| `cbor::tag(n)` | member | tag `n` written before the value; repeatable | tag `n` required; else `tag_mismatch` |
+| `cbor::byte_string` | member (`uint8_t` range) | major type 2 instead of an array of integers | same |
+| `cbor::indefinite` | member (text or byte string) | chunked indefinite-length string when `deterministic` is off | no effect |
+| `cbor::float_width(w)` | member (floating) | pins half / single / double | no effect |
+| `cbor::typed_array` | member (contiguous numeric range) | RFC 8746 tag + one byte string | accepts typed array or plain array |
+| `cbor::deterministic` | type | forbids `cbor::indefinite` inside (compile time) | RFC 8949 §4.2.1 validated on read; error names the type |
+| `cbor::self_describe` | type (top level) | tag 55799 before the value | tag skipped |
 
 Not implemented in v0.1 (spec §5.2/§5.3, deferred): `skip_if(pred)`,
 `collect_unknown_fields`. Untagged variants are a compile error, not a deferred feature.
@@ -168,8 +182,9 @@ document produced by encoding it would fail to decode. Give such a member an ini
 `default_value`.
 
 Either `skip_if_null` or `skip_if_default` anywhere in a struct makes the number of keys
-unknown until runtime, so the struct's map is emitted with an indefinite length. JSON does
-not care; CBOR does ([design/data-model.md](design/data-model.md)).
+depend on the values. The traversal evaluates the skip predicates in a first pass and still
+hands the sink a definite count, so a CBOR struct map never needs buffering
+([design/data-model.md](design/data-model.md#definite-and-indefinite-lengths)).
 
 ### required and optional
 
@@ -407,17 +422,37 @@ alternative) are out of scope for v0.1.
 ```cpp
 enum class Color { red [[=vcodec::name("bright-red")]], green, hidden [[=vcodec::skip]] };
 enum class [[=vcodec::as_integer]] Level : std::int8_t { low = -1, mid = 0, high = 1 };
+enum class [[=vcodec::as_text]]    Mode { fast, slow };
 ```
 
-By default an enum is written as the enumerator's text: `name` > `rename_all` > identifier.
-On decode the text is matched case-sensitively against names and aliases; anything else is
-`errc::unknown_enumerator` with the non-skipped names listed. A value that is not an
-enumerator at all (`Color(42)`) throws `encode_error` (`value 42 is not an enumerator of Color`).
+In JSON an enum is written by default as the enumerator's text: `name` > `rename_all` >
+identifier. On decode the text is matched case-sensitively against names and aliases;
+anything else is `errc::unknown_enumerator` with the non-skipped names listed. A value that
+is not an enumerator at all (`Color(42)`) throws `encode_error`
+(`value 42 is not an enumerator of Color`).
 
 `as_integer` on the enum type switches to the underlying integer in both directions, signed
 or unsigned as the underlying type is. On decode the integer must equal a non-skipped
 enumerator; `7` for `Level` is `'7' is not a valid Level`, with the enumerator *names* listed
 as the candidates.
+
+`as_text` is the counterpart: it selects the text form. The two exist because the
+**default differs per format** while the annotations mean the same everywhere: JSON defaults
+to text, CBOR to the integer ([cbor.md](cbor.md#differences-from-json)). The resolution
+order for an enum-typed member is: `as_integer` / `as_text` on the *member* (they may be
+placed there, and apply to the member's enum, propagating through optionals and elements),
+then the annotation on the enum type, then the format default. In JSON `as_text` is
+therefore a no-op unless it overrides a type-level `as_integer` on one member; in CBOR
+`as_integer` is redundant unless it overrides a type-level `as_text`.
+
+```cpp
+struct E { Color c = Color::red; [[=vcodec::as_text]] Color t = Color::red; };
+// JSON: {"c":"bright-red","t":"bright-red"}      CBOR: a2 6163 00 6174 6a 6272696768742d726564
+```
+
+Under the integer form, an unknown value on decode is `unknown_enumerator` with the
+*numeric* values of the non-skipped enumerators as candidates (`"0"`, `"1"` for `Color`),
+and a skipped enumerator's value is unknown.
 
 `skip` on an enumerator, and `alias` on an enumerator, are described under
 [skip](#skip) and [alias](#alias).
@@ -487,6 +522,179 @@ Keys are written as decimal strings and parsed strictly on the way back (`"x"` i
 `type_mismatch: expected integer key, found string`; a value outside the key type's range is
 `out_of_range`).
 
+## CBOR-namespace annotations
+
+These belong to `vcodec::cbor` because they express protocol intent that only CBOR can
+carry: integer keys, semantic tags, deterministic encoding, RFC 8746 typed arrays. JSON never
+sees them. The format guide, [cbor.md](cbor.md), explains the wire consequences at length;
+this section is the per-annotation reference. `cbor::format` is the format tag for
+`codec_for<T, cbor::format>`.
+
+### cbor::key
+
+```cpp
+struct S { [[=vcodec::cbor::key(1)]] int a = 1; [[=vcodec::cbor::key(-65537)]] int ext = 2; };
+// CBOR: a2 01 01 3a00010000 02        JSON: {"a":1,"ext":2}
+```
+
+Member level. Replaces the wire name with the integer `n` (`std::int64_t`, negative allowed)
+as this member's map key, on encode and decode. `name` and `rename_all` still decide the JSON
+key and the text spelling in `missing_field` details; `cbor::key` decides the CBOR key. Two
+members of one map resolving to the same integer, after `flatten` and `integer_keys`
+allocation, is a compile error naming both:
+
+```
+static assertion failed: Claims::issuer and Claims::subject both map to the CBOR key 2 (via cbor::key(2)).
+```
+
+Decode accepts the integer key **only**: the wire name and any `alias` are not text aliases
+unless the member also carries `cbor::text_key_alias`. On a member of a `transparent` type it
+is a compile error (`carries [[=cbor::key(n)]] but Wrapped is [[=vcodec::transparent]] and has no map.`).
+Works on flattened members: the key travels with the member into the parent map.
+
+### cbor::text_key_alias
+
+```cpp
+struct S { [[=vcodec::cbor::key(1), =vcodec::cbor::text_key_alias]] int a = 0; };
+// decodes from a1 01 05 and from a1 6161 05; encodes a1 01 05
+```
+
+Member level, decode only. Also accept the member's wire name, and its `alias("…")`
+spellings, as a text key. For migrating a text-keyed producer to integer keys. Never emitted.
+
+### cbor::integer_keys
+
+```cpp
+struct [[=vcodec::cbor::integer_keys]] Claims {
+    std::string iss;                             // 1
+    std::int64_t exp = 0;                        // 2
+    [[=vcodec::cbor::key(7)]] std::vector<std::byte> cti;
+    bool admin = false;                          // 3
+};
+// a4 01 … 02 … 03 … 07 …
+```
+
+Type level. Every member without an explicit `cbor::key` is allocated one: declaration
+order, starting at 1, skipping values taken by explicit keys. Skipped members
+(`[[=skip]]`) are not counted. Restrictions, each a compile error: the type may not have
+`flatten` members or base classes
+(`Claims (declared [[=cbor::integer_keys]]) has a flattened or inherited member Ext::extra; declaration-order key allocation is not defined across a flatten or a base class. Give every member an explicit [[=vcodec::cbor::key(n)]].`),
+and may not be `transparent`. The other direction is *not* checked: a type with
+`integer_keys` may be flattened into another struct, and its allocated keys then land in the
+parent's map alongside the parent's own keys (`struct Outer { int a = 1; [[=flatten]] Inner in; }`
+with `Inner` allocating 1 and 2 encodes `a3 01 … 02 … 6161 …`). A collision with an explicit
+key of the parent is caught by the duplicate-key check
+(`OuterK::a and Inner::x both map to the CBOR key 1 (via cbor::key(1)).`), but a collision
+with a *text*-keyed parent member cannot arise, so this compiles where the specification
+(§5.2) says it should not. Write explicit keys on anything that is flattened.
+
+### cbor::tag
+
+```cpp
+struct T {
+    [[=vcodec::cbor::tag(1)]]    std::int64_t when = 1363896240;          // c1 1a514b67b0
+    [[=vcodec::cbor::tag(32)]]   std::string uri = "http://x";            // d820 68…
+    [[=vcodec::cbor::tag(1), =vcodec::cbor::tag(1000)]] std::optional<int> both = 5;   // c1 d903e8 05
+};
+```
+
+Member level, repeatable; tags are written outermost first in annotation order, before the
+member's value, and are required in that order on decode (`errc::tag_mismatch`, rendered
+`expected tag 1 (epoch datetime), found tag 0 (RFC 3339 string)` or `found no tag`). An
+empty optional is written as an untagged `null` and accepted as one. The tag is emitted once
+for the member, not per element of a container member; for a struct-typed member it precedes
+the map. On a `std::chrono::sys_time` member `tag(0)` selects RFC 3339 text instead of the
+default tag 1 epoch form ([cbor.md](cbor.md#time-points)); `tag(1)` and `tag(0)` together on
+a time point is a compile error. At type level the annotation has no effect.
+
+### cbor::byte_string
+
+```cpp
+struct B { [[=vcodec::cbor::byte_string]] std::vector<std::uint8_t> raw{1, 2}; };
+// a1 63726177 42 0102        without the annotation: a1 63726177 82 0102
+```
+
+Member level. Promotes a contiguous `std::uint8_t` / `unsigned char` range to a byte string
+(major type 2), the CBOR counterpart of `json::bytes` without the alphabet. `std::byte`
+ranges are byte strings without it. Propagates through optionals and elements like `json::bytes`.
+
+### cbor::indefinite
+
+```cpp
+struct S { [[=vcodec::cbor::indefinite]] std::string s = "abc"; };
+constexpr vcodec::cbor::options loose{ .deterministic = false };
+vcodec::cbor::encode<loose>(S{});   // a1 6173 7f 63616263 ff
+vcodec::cbor::encode(S{});          // a1 6173 63616263      (deterministic: ignored)
+```
+
+Member level. Writes a text or byte string member as an indefinite-length string of
+definite chunks (at most 4 KiB each), **only when the call's `deterministic` option is
+off**. The annotation is accepted on any member and at type level, but in the current code
+it changes the encoding only for text and byte strings; arrays and maps take their
+definite/indefinite form from the `indefinite` *option*. Decode is unaffected (chunked
+strings are always accepted, except under `require_deterministic`). Inside a type declared
+`cbor::deterministic`, or on the same type as `cbor::deterministic`, it is a compile error:
+
+```
+static assertion failed: Stream::events (std::vector<int>)
+  is declared [[=cbor::indefinite]] inside Stream, which is declared [[=cbor::deterministic]];
+  deterministic encoding forbids indefinite lengths.
+```
+
+### cbor::float_width
+
+```cpp
+struct F {
+    [[=vcodec::cbor::float_width(vcodec::cbor::double_)]] double d = 1.0;   // fb 3ff0000000000000
+    [[=vcodec::cbor::float_width(vcodec::cbor::single)]]  double s = 1.0;   // fa 3f800000
+    [[=vcodec::cbor::float_width(vcodec::cbor::half)]]    double h = 0.1;   // f9 2e66
+};
+```
+
+Member level, on a floating-point member (or an optional of one); anything else is a compile
+error (`is declared [[=cbor::float_width(...)]] but is not a floating type.`). Pins the
+encoded width instead of the preferred (shortest round-tripping) form; `half` and `single`
+round, and a magnitude the width cannot hold throws `encode_error` (`out_of_range`). Wins
+over `options::floats`. Decode is unaffected.
+
+### cbor::typed_array
+
+```cpp
+struct A { [[=vcodec::cbor::typed_array]] std::vector<std::uint16_t> u16{1, 2}; };
+// d845 44 0100 0200   (tag 69: uint16, little-endian, on a little-endian host)
+```
+
+Member level. Encodes a contiguous, sized range of 8–64-bit integers, `float` or `double`
+as one RFC 8746 tag (chosen by element type, signedness and native endianness) and one byte
+string. Anything else is a compile error
+(`is declared [[=cbor::typed_array]] but is not a contiguous range of a fixed-width integer or floating type.`).
+Decode of the annotated member accepts a typed array of any width and endianness (converted)
+or a plain array; with `options::accept_typed_arrays` (the default) unannotated numeric
+ranges accept typed arrays too.
+
+### cbor::deterministic
+
+```cpp
+struct [[=vcodec::cbor::deterministic]] Signed { [[=vcodec::cbor::key(2)]] int a = 0; [[=vcodec::cbor::key(4)]] int b = 0; };
+```
+
+Type level. For types whose identity is their canonical encoding. On decode of such a type
+(as the top-level value) RFC 8949 §4.2.1 is validated regardless of
+`options::require_deterministic`, and the error names the type
+(`key 2 precedes key 4; Signed is declared [[=cbor::deterministic]]`). At compile time it
+forbids `cbor::indefinite` within the type. On encode it adds nothing to the default
+`deterministic` option and does not override a call that turns it off.
+
+### cbor::self_describe
+
+```cpp
+struct [[=vcodec::cbor::self_describe]] SD { int a = 1; };   // d9d9f7 a1 6161 01
+```
+
+Type level, top-level types only. Prefixes the encoding with tag 55799; on decode a leading
+tag 55799 is always skipped, annotated or not. On a type used as a member it is a compile
+error (`the self-describe tag applies to a top-level value only.`).
+
 ## Interactions and propagation
 
 - **Field annotations that select a representation propagate through wrappers and
@@ -504,3 +712,18 @@ Keys are written as decimal strings and parsed strictly on the way back (`"x"` i
   variant-typed members.
 - `describe<T>` annotations are merged with source annotations of the same member; both are
   visible to every rule above.
+- **CBOR keys.** `cbor::key` beats `cbor::integer_keys` allocation, which beats the wire
+  name. `name` and `rename_all` are irrelevant to a member's CBOR key once it has an
+  integer key, but still name it in JSON and in `missing_field` details
+  (`missing required field 'issuer' (key 1)`). `alias` and the wire name are accepted on
+  CBOR decode of an integer-keyed member only with `cbor::text_key_alias`. `cbor::key` on a
+  flattened member travels into the parent map; `cbor::integer_keys` refuses `flatten` and
+  inheritance.
+- **Enum defaults.** Member-level `as_integer` / `as_text` beat the enum type's annotation,
+  which beats the format default (JSON text, CBOR integer).
+- **Tags and optionals.** `cbor::tag` applies to the present value; an empty optional is an
+  untagged `null`. A time point member without `cbor::tag` gets tag 1.
+- `cbor::deterministic` × `cbor::indefinite` on the same type or a member within it is a
+  compile error; so is `options{ .deterministic = true, .indefinite = true }`.
+- `json::*` annotations are accepted and ignored by CBOR (bytes, integer keys and large
+  integers are native); `cbor::*` annotations are accepted and ignored by JSON.

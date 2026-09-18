@@ -16,6 +16,10 @@
 
 namespace vcodec::cbor::detail {
 
+// Built from an iterator range: the (const char*, n) constructor compares the pointer with
+// nullptr, which UBSan instrumentation turns into a non-constant expression under GCC 16.
+consteval std::string sv_str(std::string_view s) { return std::string(s.begin(), s.end()); }
+
 template<class T> struct is_sys_time_t : std::false_type {};
 template<class D> struct is_sys_time_t<std::chrono::sys_time<D>> : std::true_type {};
 template<class T> inline constexpr bool is_sys_time_v = is_sys_time_t<std::remove_cvref_t<T>>::value;
@@ -111,6 +115,13 @@ struct format_traits<cbor::format> : format_traits_defaults {
             if (is_annotation_of_type(a, ^^cbor::tag_t)) v.push_back(std::meta::extract<cbor::tag_t>(a).tag);
         // A time point without an explicit tag is tag 1 (epoch) by default.
         if (v.empty() && cbor::detail::is_sys_time_v<T>) v.push_back(1);
+        // A struct declared [[=cbor::tag(n)]] at type level is tagged wherever it appears
+        // (the "tagged newtype" idiom with transparent, or a tagged record).
+        if constexpr (class_type<T> && !string_like<T> && !std::ranges::range<T> && !optional_like<T> && !variant_like<T> && !tuple_like<T>) {
+            if (v.empty())
+                for (auto a : detail::type_annotations_of<T>())
+                    if (is_annotation_of_type(a, ^^cbor::tag_t)) v.push_back(std::meta::extract<cbor::tag_t>(a).tag);
+        }
         return v;
     }
 
@@ -137,10 +148,10 @@ struct format_traits<cbor::format> : format_traits_defaults {
             using Owner = typename [:F.owner:];
             auto owner_anns = detail::type_annotations_of<Owner>();
             if (has_annotation<cbor::indefinite_t>(F.anns()) && has_annotation<cbor::deterministic_t>(owner_anns))
-                return "is declared [[=cbor::indefinite]] inside "s + std::string(type_name_of(^^Owner))
+                return "is declared [[=cbor::indefinite]] inside "s + cbor::detail::sv_str(type_name_of(^^Owner))
                      + ", which is declared [[=cbor::deterministic]];\n  deterministic encoding forbids indefinite lengths."s;
             if (find_annotation<cbor::key_t>(F.anns()) && has_annotation<transparent_t>(owner_anns))
-                return "carries [[=cbor::key(n)]] but "s + std::string(type_name_of(^^Owner)) + " is [[=vcodec::transparent]] and has no map."s;
+                return "carries [[=cbor::key(n)]] but "s + cbor::detail::sv_str(type_name_of(^^Owner)) + " is [[=vcodec::transparent]] and has no map."s;
         }
         if constexpr (class_type<T>) {
             if (has_annotation<cbor::self_describe_t>(detail::type_annotations_of<T>()))
@@ -156,10 +167,20 @@ struct format_traits<cbor::format> : format_traits_defaults {
         if (has_annotation<cbor::integer_keys_t>(anns)) {
             for (auto const& f : schema_of<T>) {
                 if (has(f.flags, field_flags::flattened) || has(f.flags, field_flags::inherited)) {
-                    return "(declared [[=cbor::integer_keys]]) has a flattened or inherited member "s + std::string(f.qualified.view())
+                    return "(declared [[=cbor::integer_keys]]) has a flattened or inherited member "s + cbor::detail::sv_str(f.qualified.view())
                          + ";\n  declaration-order key allocation is not defined across a flatten or a base class.\n  Give every member an explicit [[=vcodec::cbor::key(n)]]."s;
                 }
             }
+        }
+        // The converse: a struct declared integer_keys flattened into this one.
+        template for (constexpr auto f : fields_of<T>) {
+            if constexpr (has(f.info.flags, field_flags::flattened) && f.owner != ^^T) {
+                if (has_annotation<cbor::integer_keys_t>(detail::type_annotations_of<typename [:f.owner:]>()))
+                    return "flattens "s + cbor::detail::sv_str(type_name_of(f.owner)) + ", which is declared [[=cbor::integer_keys]];\n  declaration-order keys do not survive a flatten. Give "s
+                         + cbor::detail::sv_str(type_name_of(f.owner)) + "'s members explicit [[=vcodec::cbor::key(n)]]."s;
+            }
+        }
+        if (false) {
             if (has_annotation<transparent_t>(anns))
                 return "is declared both [[=cbor::integer_keys]] and [[=vcodec::transparent]]."s;
         }

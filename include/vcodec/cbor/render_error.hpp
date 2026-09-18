@@ -25,7 +25,7 @@ inline std::string describe_head(cbor::parsed_head const& h, std::span<const std
     if (h.indefinite) return d + ", indefinite length";
     switch (h.mt) {
     case cbor::major::uint:  return d + ", value " + std::to_string(h.value);
-    case cbor::major::nint:  return d + ", value -" + std::to_string(h.value) + "-1";
+    case cbor::major::nint:  return d + ", value " + (h.value == UINT64_MAX ? std::string("-18446744073709551616") : "-" + std::to_string(h.value + 1));
     case cbor::major::bytes:
     case cbor::major::text:  return d + ", length " + std::to_string(h.value);
     case cbor::major::array: return d + ", " + std::to_string(h.value) + " elements";

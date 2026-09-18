@@ -89,9 +89,20 @@ TEST_CASE("deterministic: validation on read (§8.2)") {
     CHECK(e5.detail() == "duplicate map key");
     auto e6 = rej("7f6161ff");                      // indefinite string
     CHECK(e6.detail() == "indefinite-length text string");
+    auto e7 = rej("f97e01");                        // NaN with a payload
+    CHECK(e7.detail() == "NaN not encoded as f97e00");
+    rej("fb7ff8000000000000");                      // canonical NaN, but as a double
+    // keys of any kind are ordered, however the caller decodes them: [1] (0x8101) before 10 (0x0a)
+    auto e8 = rej("a2" "810101" "0a02");
+    CHECK(e8.detail() == "map keys out of canonical order");
+    // the validator agrees with the typed path
+    { auto b = from_hex("a2" "810101" "0a02"); cb::reader<strict> r(b); auto st = r.skip_value(); REQUIRE_FALSE(st); CHECK(st.error().code() == vcodec::errc::non_deterministic); }
+    { auto b = from_hex("a2" "0a02" "810101"); cb::reader<strict> r(b); CHECK(r.skip_value()); }
     // valid canonical input passes
     CHECK(cb::decode<vcodec_test::dom::value, strict>(from_hex("a2" "0201" "0402")));
+    CHECK(cb::decode<vcodec_test::dom::value, strict>(from_hex("a2" "0a02" "810101")));
     CHECK(cb::decode<vcodec_test::dom::value, strict>(from_hex("f93c00")));
+    CHECK(cb::decode<vcodec_test::dom::value, strict>(from_hex("f97e00")));
     // and the same bytes decode fine without the option
     CHECK(cb::decode<vcodec_test::dom::value>(from_hex("1805")));
     CHECK(cb::decode<vcodec_test::dom::value>(from_hex("9f01ff")));

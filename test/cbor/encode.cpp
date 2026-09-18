@@ -114,6 +114,23 @@ TEST_CASE("cbor encode: structs, integer keys, canonical member order") {
     CHECK(enc(JsonToo{}) == "a10101");
 }
 
+TEST_CASE("cbor encode: a deterministic type is canonical whatever the options say") {
+    struct [[=cb::deterministic]] Canon { std::map<std::string, int> m{{"aa", 1}, {"b", 2}}; };
+    CHECK(enc<loose>(Canon{}) == enc(Canon{}));
+    CHECK(enc<indef>(Canon{}) == "a1" "616d" "a2" "616202" "62616101");
+}
+
+TEST_CASE("cbor encode: indefinite arrays and maps at member level; type-level tags") {
+    struct S { [[=cb::indefinite]] std::vector<int> v{1}; [[=cb::indefinite]] std::map<std::string, int> m{{"a", 1}}; std::vector<int> plain{2}; };
+    CHECK(enc<loose>(S{}) == "a3" "616d" "bf616101ff" "6176" "9f01ff" "65706c61696e" "8102");
+    CHECK(enc(S{}) == "a3" "616d" "a1616101" "6176" "8101" "65706c61696e" "8102");
+    struct [[=vcodec::transparent, =cb::tag(1000)]] Wrap { int v = 5; };
+    CHECK(enc(Wrap{}) == "d903e805");
+    struct [[=cb::tag(1001)]] Record { int a = 1; };
+    struct Holder { Wrap w; Record r; std::optional<Record> none; };
+    CHECK(enc(Holder{}) == "a3" "6172" "d903e9a1616101" "6177" "d903e805" "646e6f6e65" "f6");
+}
+
 TEST_CASE("cbor encode: enums default to integers; as_text restores names") {
     CHECK(enc(Color::green) == "01");
     CHECK(enc(Level::low) == "20");

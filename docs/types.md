@@ -17,17 +17,22 @@ static assertion failed: Config::database::pool::handle (type void*)
 
 `cv` and reference qualifiers are stripped before classification everywhere.
 
+The classification is format-independent; only the wire shape differs. Each table below
+gives the JSON and the CBOR shape side by side, and the per-category notes say where CBOR
+adds something (borrowing into spans, integer keys, typed arrays, time points). The CBOR
+shapes are described in full in [cbor.md](cbor.md#wire-shapes).
+
 ## Scalars
 
-| Type | Concept | JSON |
-|---|---|---|
-| `bool` | `boolean_type` | `true` / `false` |
-| `char` | `char_type` | one-character string: `'x'` ↔ `"x"` |
-| signed integers | `signed_integral_type` | number |
-| unsigned integers | `unsigned_integral_type` | number |
-| `float`, `double`, `long double` | `floating_type` | number |
-| enumerations | `enum_type` | string by name, or number with `as_integer` |
-| `std::byte` | `byte_type` | only as an element of a byte-like range |
+| Type | Concept | JSON | CBOR |
+|---|---|---|---|
+| `bool` | `boolean_type` | `true` / `false` | `f5` / `f4` |
+| `char` | `char_type` | one-character string: `'x'` ↔ `"x"` | one-character text string `61 78` |
+| signed integers | `signed_integral_type` | number | major 0 when ≥ 0, major 1 when negative |
+| unsigned integers | `unsigned_integral_type` | number | major 0 |
+| `float`, `double`, `long double` | `floating_type` | number | major 7, shortest of half / single / double that round-trips |
+| enumerations | `enum_type` | string by name, or number with `as_integer` | integer by underlying value, or text with `as_text` |
+| `std::byte` | `byte_type` | only as an element of a byte-like range | same |
 
 ### Integers
 
@@ -39,10 +44,13 @@ than silently encoded as a number. Give it a `codec_for` or `with<Codec>` if you
 
 Encoding writes the exact decimal value; 64-bit values above 2⁵³ are emitted exactly, not
 rounded. Use [`json::as_string`](annotations.md#jsonas_string) for consumers that cannot hold
-them.
+them. CBOR writes the shortest head for the magnitude (`1000u` → `19 03e8`) and represents
+every 64-bit value; a negative CBOR integer below `INT64_MIN` (`3b ffffffffffffffff`) is
+`out_of_range` with the exact literal (`value -18446744073709551616 out of range for std::int64_t`).
 
 Decoding accepts only integer literals: `1.0` and `1e2` are `type_mismatch`
-(`expected integer, found number`). The literal must fit the member's type in both
+(`expected integer, found number`); in CBOR a float item into an integer member is likewise
+`expected integer, found float`. The literal must fit the member's type in both
 directions, else `out_of_range`:
 
 ```
@@ -73,6 +81,12 @@ literals too large for 64 bits (`18446744073709551616` → `1.8446744073709552e1
 literal whose magnitude overflows `double` (`1e400`) is `out_of_range` for `double`;
 underflow (`1e-400`) is `0.0`, not an error.
 
+**CBOR** has three float widths and uses the shortest that round-trips (`1.0` → `f9 3c00`,
+`100000.0` → `fa 47c35000`, `1.1` → `fb 3ff199999999999a`); `float` members widen to
+`double` first so they are always half or single. NaN and infinities have a spelling
+(`f9 7e00`, `f9 7c00`, `f9 fc00`) and round-trip. `cbor::float_width` pins a width per
+member. Decoding accepts any width and integers ([cbor.md](cbor.md#floats)).
+
 ### Enumerations
 
 ```cpp
@@ -80,11 +94,15 @@ enum class Color { red [[=vcodec::name("bright-red")]], green, hidden [[=vcodec:
 enum class [[=vcodec::as_integer]] Level : std::int8_t { low = -1, mid = 0, high = 1 };
 ```
 
-By default an enumerator is written as a string: its `name`, else the enum's `rename_all`
-transformation of the identifier, else the identifier. Decoding matches names and `alias`es
-exactly; anything else is `unknown_enumerator` with the valid names listed. With
-`as_integer` on the enum type the underlying integer is used in both directions and the value
-must equal a non-skipped enumerator.
+In JSON an enumerator is written by default as a string: its `name`, else the enum's
+`rename_all` transformation of the identifier, else the identifier. Decoding matches names
+and `alias`es exactly; anything else is `unknown_enumerator` with the valid names listed.
+With `as_integer` on the enum type (or on the member) the underlying integer is used in both
+directions and the value must equal a non-skipped enumerator.
+
+**In CBOR the default is the integer** (`Color::green` → `01`); `as_text` on the enum type or
+the member restores names. The annotations mean the same in both formats; only the default
+differs ([annotations.md](annotations.md#enum-level-annotations)).
 
 Encoding a value that is a skipped enumerator, or no enumerator at all, throws
 `encode_error` ([errors.md](errors.md#encode-side-failures)).
@@ -94,16 +112,22 @@ Encoding a value that is a skipped enumerator, or no enumerator at all, throws
 | Type | Concept | Encode | Decode |
 |---|---|---|---|
 | `std::string`, `std::u8string` | `owned_string` | yes | yes, copies |
-| `std::string_view`, `std::u8string_view` | `string_view_type` | yes | yes, **borrows** |
+| `std::string_view`, `std::u8string_view` | `string_view_type` | yes | yes, **borrows** (CBOR: definite-length strings only) |
 | `const char*`, `char*` | `c_string` | yes (`nullptr` → `""`) | compile error |
 
-Encoding escapes `"`, `\` and control characters below U+0020 (`\b \f \n \r \t`, otherwise
+In CBOR every string is a major type 3 text string (`"IETF"` → `64 49455446`), validated
+as UTF-8 in both directions when `validate_utf8` is on; there is no escaping. An
+indefinite-length (chunked) text string is assembled and copied into owning strings and, for
+a `std::string_view`, is `escape_in_borrowed_string` — the same error as JSON escapes,
+because the meaning (a view cannot alias assembled text) is the same.
+
+JSON encoding escapes `"`, `\` and control characters below U+0020 (`\b \f \n \r \t`, otherwise
 `\u00XX` with uppercase hex). `/`, DEL and non-ASCII bytes are written raw. Strings are
 validated as UTF-8 first when `options::validate_utf8` is on (the default); a malformed
 string throws `encode_error` with code `invalid_utf8`. `u8string` bytes are written as they
 are.
 
-Decoding handles every JSON escape including `\uXXXX` surrogate pairs; lone surrogates are
+JSON decoding handles every escape including `\uXXXX` surrogate pairs; lone surrogates are
 `invalid_escape`, raw control characters are `unexpected_token`, malformed UTF-8 is
 `invalid_utf8` (when validating). Whitespace between tokens is exactly space, `\n`, `\r`
 and `\t`.
@@ -124,10 +148,11 @@ time ("has no codec") rather than encoded as an array of code units. Give such a
 
 A `std::string_view` member decodes by pointing into the input buffer. The rules:
 
-1. **The result's lifetime is bound to the input.** `decode` takes a `std::string_view`; the
-   caller keeps that buffer alive as long as the decoded value is used. `vcodec::json::borrows<T>`
-   is `true` for any type that borrows somewhere inside (a `std::string_view` member, an
-   element, a map key or value).
+1. **The result's lifetime is bound to the input.** `decode` takes a `std::string_view`
+   (JSON) or a `std::span<const std::byte>` (CBOR); the caller keeps that buffer alive as long
+   as the decoded value is used. `vcodec::json::borrows<T>` / `vcodec::cbor::borrows<T>` is
+   `true` for any type that borrows somewhere inside (a `std::string_view` member, an
+   element, a map key or value; in CBOR also a `std::span<const std::byte>`).
 2. **A temporary `std::string` cannot be the input for a borrowing type.** The overload is
    deleted with a message:
    ```
@@ -148,17 +173,22 @@ A `std::string_view` member decodes by pointing into the input buffer. The rules
 4. `decode_into` with a borrowing type has the same lifetime rule: the object's views alias
    the buffer passed to that call.
 
-`std::span<const std::byte>` is encode-only in v0.1 (there is nothing to borrow *into* on the
-JSON side, since base64 must be decoded). It will borrow the way views do once a binary
-format lands.
+**`std::span<const std::byte>` borrows in CBOR, not in JSON.** Under JSON it is encode-only
+(there is nothing to borrow *into*, since base64 must be decoded first). Under CBOR a
+definite-length byte string is a contiguous run of input bytes, so the span aliases the
+input exactly as a `std::string_view` does, with rules 1, 2 and 4 above; a chunked
+(indefinite-length) byte string is `errc::indefinite_in_borrowed_string`
+(`use std::vector<std::byte> instead of std::span<const std::byte>`). A type with such a
+member is therefore `cbor::decodable` and not `json::decodable`
+(`vcodec::cbor_only<T>`).
 
 ## Bytes
 
-| Type | Bytes? |
-|---|---|
-| `std::vector<std::byte>`, `std::array<std::byte, N>`, any contiguous range of `std::byte` | always (`byte_like`) |
-| `std::span<const std::byte>` | always; encode-only |
-| `std::vector<std::uint8_t>`, `std::vector<unsigned char>`, other contiguous `uint8_t` ranges (`contiguous_of_uint8`) | only with `json::bytes(...)`; otherwise an array of numbers |
+| Type | Bytes? | JSON | CBOR |
+|---|---|---|---|
+| `std::vector<std::byte>`, `std::array<std::byte, N>`, any contiguous range of `std::byte` | always (`byte_like`) | needs `json::bytes(enc)` | major type 2 (`44 01020304`) |
+| `std::span<const std::byte>` | always | encode-only, with `json::bytes` | major type 2; decodes by **borrowing** |
+| `std::vector<std::uint8_t>`, `std::vector<unsigned char>`, other contiguous `uint8_t` ranges (`contiguous_of_uint8`) | only when promoted | with `json::bytes(...)`; otherwise an array of numbers | with `cbor::byte_string`; otherwise an array of integers |
 
 A byte-like member must say how JSON should spell it; there is never a silent guess:
 
@@ -178,8 +208,10 @@ static assertion failed: Claims::nonce (std::vector<std::byte>)
 Encodings and their decode rules are under [`json::bytes`](annotations.md#jsonbytes). A
 `std::array<std::byte, N>` must decode to exactly `N` bytes
 (`expected byte string of length 2, found byte string of length 3`). Decoding into a byte
-container needs `assign(first, last)` or `push_back`; `std::span` is rejected with the
-encode-only message (`Use std::vector<std::byte>`).
+container needs `assign(first, last)` or `push_back`; under JSON `std::span` is rejected
+with the encode-only message (`Use std::vector<std::byte>`). CBOR needs no annotation at
+all (`is_bytes` and `can_lower_bytes` are the CBOR-shaped defaults), so the same type
+compiles under CBOR and fails under JSON until it gets `json::bytes`.
 
 ## Optional-like
 
@@ -247,6 +279,10 @@ static assertion failed: Frame::samples (std::span<const int>)
 
 (`std::array<std::byte, N>` and `std::span<const std::byte>` are bytes, above, not arrays.)
 
+In CBOR, a `std::array` or `T[N]` of 8–64-bit integers, `float` or `double` also accepts an
+RFC 8746 typed array of exactly `N` elements on decode, and is written as one with
+`cbor::typed_array` ([Typed arrays](#typed-arrays-cbor)).
+
 ## Sequences and custom containers
 
 ```cpp
@@ -298,6 +334,29 @@ struct ring {
 Elements are decoded one at a time into a temporary and moved in; an element failure carries
 its index in the path (`$.items[3]`).
 
+### Typed arrays (CBOR)
+
+A contiguous, sized range of 8–64-bit integers, `float` or `double` (`std::vector`,
+`std::array`, `T[N]`, `std::span`) has a bulk form in CBOR, RFC 8746: one tag naming the
+element type, signedness and endianness, then one byte string holding the elements in
+memory order.
+
+```cpp
+struct A { [[=vcodec::cbor::typed_array]] std::vector<std::uint16_t> u16{1, 2}; std::vector<std::uint16_t> plain{1}; };
+// u16:   d845 44 0100 0200      tag 69 (uint16, little-endian), 4 bytes
+// plain: 81 01                  an ordinary array
+```
+
+Encoding uses the bulk form only where `cbor::typed_array` asks for it, in the host's native
+endianness, with one `memcpy`. Decoding, with `options::accept_typed_arrays` (the default),
+accepts a typed array of *any* width, signedness and endianness into *any* such range,
+annotated or not, converting element by element (or copying when the representation
+matches); values that do not fit are `out_of_range`, a float typed array into an integer
+range is `type_mismatch`, and a byte string that is not a whole number of elements is
+`malformed_item`. The annotated member accepts a plain array too. `std::vector<bool>` and
+non-contiguous ranges cannot be typed arrays (compile error). JSON has no equivalent; the
+annotation is ignored there and the member is an ordinary array.
+
 ## Maps
 
 ```cpp
@@ -313,9 +372,13 @@ encodes as a JSON object: `std::map`, `std::unordered_map`, `std::multimap`, and
 **`std::vector<std::pair<std::string, T>>`**, which is an object, not an array of two-element
 arrays. Wrap the pair in a struct if you want the array form.
 
-Integral keys need `[[=vcodec::json::stringify_keys]]`
+Under JSON, integral keys need `[[=vcodec::json::stringify_keys]]`
 ([annotations.md](annotations.md#jsonstringify_keys)); without it the type is a compile
-error. String-view keys borrow like string-view values.
+error. Under CBOR integral keys are native, negative ones included
+(`std::map<int, std::string>{{-1, "m"}, {7, "s"}}` → `a2 20 616d 07 6173`), and a
+`std::map<int, T>` without the JSON annotation is `vcodec::cbor_only`. String-view keys
+borrow like string-view values. A CBOR map whose keys are neither text nor integers (a
+boolean key, say) is `type_mismatch` against the key type.
 
 Decoding needs `insertable_map`: `emplace(k, v)`, `insert(pair)`, `push_back(pair)` or
 `emplace_back(k, v)`. `clear()` is called first if present. Values are decoded into a
@@ -326,6 +389,11 @@ whose `emplace` reports success) follow `options::duplicates` exactly as struct 
 `last_wins` (the default) decodes the later value over the earlier one, `first_wins` skips
 the later value, and `error` reports `duplicate_key` with the key in the path. A
 `std::multimap` or a range of pairs is not keyed and keeps every occurrence, in order.
+
+Under deterministic CBOR (the default) a runtime map is buffered and its entries sorted by
+encoded key on encode, and two entries with the same key throw `encode_error`
+([cbor.md](cbor.md#structs-never-buffer-runtime-maps-do)); on decode with
+`require_deterministic`, keys out of canonical order or repeated are `non_deterministic`.
 
 ## Classes
 
@@ -345,6 +413,23 @@ never classified. Standard library classes that are not in the table above (a
 `std::filesystem::path`, a `std::chrono::time_point`) are reflected like any other class,
 which is rarely what you want; give them a codec.
 
+### `std::chrono::sys_time` (CBOR only)
+
+CBOR ships `codec_for<std::chrono::sys_time<Duration>, cbor::format>`
+(`<vcodec/cbor/tags.hpp>`): tag 1 with epoch seconds as an integer, or as a double when the
+value is not whole seconds; with `[[=vcodec::cbor::tag(0)]]` on the member, tag 0 with RFC
+3339 text. Decoding accepts integer, float and (under tag 0) text payloads and requires the
+matching tag ([cbor.md](cbor.md#time-points)).
+
+```cpp
+struct Event { std::chrono::sys_seconds when{ std::chrono::seconds(1363896240) }; };
+// CBOR: a1 647768656e c1 1a 514b67b0        JSON: {"when":{"__d":{"__r":1363896240}}}  (reflected; give it a codec)
+```
+
+Under JSON there is no codec, so the time point is reflected through its private duration
+member as shown; that compiles, but it is an accident of the standard library's layout, not
+a wire format. `std::chrono::duration` is a number in its own units in both formats.
+
 ## Summary of the classification order
 
 For a type `T` with field context `F`, the traversal takes the first that applies:
@@ -357,9 +442,12 @@ For a type `T` with field context `F`, the traversal takes the first that applie
 6. strings (`owned_string`, `string_view_type`, `c_string`)
 7. `optional_like`
 8. `variant_like`
-9. bytes, as decided by the format (`format_traits<Format>::is_bytes<F, T>()`)
+9. bytes, as decided by the format (`format_traits<Format>::is_bytes<F, T>()`: `std::byte`
+   ranges everywhere, plus `uint8_t` ranges under `json::bytes` or `cbor::byte_string`)
 10. `map_like`
 11. `tuple_like`
-12. `fixed_array`, `span_like`, `sequence` (decode: `fixed_array`, then `appendable_range`)
+12. `fixed_array`, `span_like`, `sequence` (decode: `fixed_array`, then `appendable_range`);
+    before the element-wise path, a format's bulk-range hook when it asks for it
+    (CBOR typed arrays)
 13. `reflectable_class`
 14. otherwise: compile error, "has no codec"
