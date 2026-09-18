@@ -1,0 +1,6 @@
+// Not a case: this program compiles. The harness must report that as a failure, and
+// test/compile_fail/CMakeLists.txt registers it with WILL_FAIL to prove that it does.
+// expect-error: this text never appears
+#include <vcodec/json.hpp>
+struct Ok { int a = 0; };
+int main() { return vcodec::json::encode(Ok{}).size(); }

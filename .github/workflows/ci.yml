@@ -1,0 +1,102 @@
+# CI (spec §13, §14 item 14). GCC 16 is required and blocking; clang-p2996 is best-effort
+# and never blocks (§2.1). The image is expected to provide g++-16 with -freflection; adjust
+# the container tag when a released image exists.
+name: ci
+
+on:
+  push:
+    branches: [master, main]
+  pull_request:
+
+jobs:
+  gcc16:
+    name: GCC 16 (${{ matrix.build }})
+    runs-on: ubuntu-latest
+    container: gcc:16
+    strategy:
+      fail-fast: false
+      matrix:
+        build: [Debug, Release, ASan+UBSan]
+    steps:
+      - uses: actions/checkout@v4
+      - name: Install CMake and Ninja
+        run: |
+          apt-get update
+          apt-get install -y --no-install-recommends cmake ninja-build git ca-certificates
+          cmake --version
+          g++ --version
+      - name: Configure
+        run: |
+          if [ "${{ matrix.build }}" = "ASan+UBSan" ]; then
+            cmake -S . -B build -G Ninja -DCMAKE_BUILD_TYPE=Debug -DVCODEC_SANITIZE=ON -DVCODEC_BUILD_SPIKE=ON
+          else
+            cmake -S . -B build -G Ninja -DCMAKE_BUILD_TYPE=${{ matrix.build }} -DVCODEC_BUILD_SPIKE=ON
+          fi
+      - name: Build
+        run: ninja -C build
+      - name: Test
+        run: ctest --test-dir build --output-on-failure -j 4
+
+  fuzz:
+    name: Fuzz (60 s per harness, ASan+UBSan)
+    runs-on: ubuntu-latest
+    container: gcc:16
+    steps:
+      - uses: actions/checkout@v4
+      - name: Install CMake and Ninja
+        run: |
+          apt-get update
+          apt-get install -y --no-install-recommends cmake ninja-build git ca-certificates
+      - name: Configure
+        run: cmake -S . -B build -G Ninja -DCMAKE_BUILD_TYPE=Debug -DVCODEC_BUILD_TESTS=OFF -DVCODEC_BUILD_FUZZERS=ON -DVCODEC_FUZZ_SECONDS=60
+      - name: Build
+        run: ninja -C build
+      - name: Run
+        run: ctest --test-dir build --output-on-failure -R '^fuzz\.'
+
+  compile-time:
+    name: Compile-time budget
+    runs-on: ubuntu-latest
+    container: gcc:16
+    steps:
+      - uses: actions/checkout@v4
+      - name: Install CMake and Ninja
+        run: |
+          apt-get update
+          apt-get install -y --no-install-recommends cmake ninja-build git ca-certificates
+      - name: Configure
+        run: cmake -S . -B build -G Ninja -DCMAKE_BUILD_TYPE=Release -DVCODEC_BUILD_TESTS=OFF -DVCODEC_BUILD_BENCHMARKS=ON
+      - name: Budget
+        run: ctest --test-dir build --output-on-failure -R compile_time_budget
+
+  layering:
+    name: Layering check
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - run: cmake -DVCODEC_INCLUDE_DIR=$PWD/include/vcodec -P cmake/LayeringCheck.cmake
+
+  clang-p2996:
+    # Best-effort (§2.1): runs when an image is available, failures are recorded, never block.
+    name: clang-p2996 (best-effort)
+    runs-on: ubuntu-latest
+    continue-on-error: true
+    steps:
+      - uses: actions/checkout@v4
+      - name: Status
+        run: |
+          echo "No public clang-p2996 image is pinned; see docs/compatibility.md."
+          echo "When one exists: cmake -DCMAKE_CXX_COMPILER=clang++ -DCMAKE_CXX_FLAGS='-stdlib=libc++' and run ctest."
+
+  nightly-fuzz:
+    name: Nightly fuzz (1 h per harness)
+    if: github.event_name == 'schedule'
+    runs-on: ubuntu-latest
+    container: gcc:16
+    steps:
+      - uses: actions/checkout@v4
+      - run: |
+          apt-get update && apt-get install -y --no-install-recommends cmake ninja-build git ca-certificates
+          cmake -S . -B build -G Ninja -DCMAKE_BUILD_TYPE=Debug -DVCODEC_BUILD_TESTS=OFF -DVCODEC_BUILD_FUZZERS=ON -DVCODEC_FUZZ_SECONDS=3600
+          ninja -C build
+          ctest --test-dir build --output-on-failure -R '^fuzz\.' --timeout 4000
