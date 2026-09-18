@@ -4,8 +4,11 @@
 
 #include <vcodec/core/compiler.hpp>
 
+#include <cmath>
 #include <cstddef>
 #include <cstdint>
+#include <limits>
+#include <optional>
 #include <span>
 #include <string>
 #include <string_view>
@@ -89,6 +92,51 @@ inline bool hex_decode(std::string_view in, std::vector<std::byte>& out) {
         out.push_back(std::byte((hi << 4) | lo));
     }
     return true;
+}
+
+// ---- IEEE 754 binary16 ---------------------------------------------------------------------
+// Exact conversions with round-to-nearest-even. Used by CBOR preferred float serialization.
+
+constexpr double from_half(std::uint16_t h) noexcept {
+    unsigned sign = (h >> 15) & 1, exp = (h >> 10) & 0x1F, mant = h & 0x3FF;
+    double v;
+    if (exp == 0)       v = std::ldexp(static_cast<double>(mant), -24);           // subnormal or zero
+    else if (exp == 31) v = mant ? std::numeric_limits<double>::quiet_NaN() : std::numeric_limits<double>::infinity();
+    else                v = std::ldexp(static_cast<double>(mant + 1024), static_cast<int>(exp) - 25);
+    return sign ? -v : v;
+}
+
+// Returns nullopt when the value cannot be represented exactly as a half (so callers can fall
+// back to single/double). Infinities and NaN are representable; NaN maps to the canonical
+// quiet NaN 0x7E00.
+constexpr std::optional<std::uint16_t> to_half(double d) noexcept {
+    if (d != d) return std::uint16_t(0x7E00);
+    std::uint16_t sign = std::signbit(d) ? 0x8000 : 0;
+    if (std::isinf(d)) return std::uint16_t(sign | 0x7C00);
+    double a = std::fabs(d);
+    if (a == 0.0) return sign;
+    if (a > 65504.0) return std::nullopt;
+    int exp = 0;
+    double frac = std::frexp(a, &exp);       // a = frac * 2^exp, frac in [0.5, 1)
+    // normal half: a = (1 + m/1024) * 2^(e-15), e in 1..30  →  exp-1 in -14..15
+    int e = exp - 1 + 15;
+    if (e >= 1) {
+        double scaled = frac * 2048.0;       // 1024 <= scaled < 2048
+        if (scaled != static_cast<double>(static_cast<std::uint32_t>(scaled))) return std::nullopt;
+        auto m = static_cast<std::uint32_t>(scaled) - 1024;
+        return static_cast<std::uint16_t>(sign | (static_cast<unsigned>(e) << 10) | m);
+    }
+    // subnormal half: a = m * 2^-24, m in 1..1023
+    double m = std::ldexp(a, 24);
+    if (m != static_cast<double>(static_cast<std::uint32_t>(m)) || m >= 1024.0) return std::nullopt;
+    return static_cast<std::uint16_t>(sign | static_cast<std::uint32_t>(m));
+}
+
+// Does the double survive a round trip through float?
+constexpr bool fits_single(double d) noexcept {
+    if (d != d) return true;
+    float f = static_cast<float>(d);
+    return static_cast<double>(f) == d;
 }
 
 } // namespace vcodec::core

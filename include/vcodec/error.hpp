@@ -36,9 +36,17 @@ enum class errc : std::uint16_t {
     out_of_range, unknown_enumerator, no_variant_alternative, missing_tag,
     // policy
     escape_in_borrowed_string, non_text_key,
+    // v0.2 (CBOR): syntax
+    malformed_item, unsupported_simple_value,
+    // v0.2: schema
+    tag_mismatch,
+    // v0.2: policy
+    non_deterministic, indefinite_in_borrowed_string,
 };
 
-constexpr bool is_syntax_error(errc c) noexcept { return c <= errc::truncated; }
+constexpr bool is_syntax_error(errc c) noexcept {
+    return c <= errc::truncated || c == errc::malformed_item || c == errc::unsupported_simple_value;
+}
 
 constexpr std::string_view to_string(errc c) noexcept {
     switch (c) {
@@ -60,6 +68,11 @@ constexpr std::string_view to_string(errc c) noexcept {
     case errc::missing_tag:               return "missing_tag";
     case errc::escape_in_borrowed_string: return "escape_in_borrowed_string";
     case errc::non_text_key:              return "non_text_key";
+    case errc::malformed_item:            return "malformed_item";
+    case errc::unsupported_simple_value:  return "unsupported_simple_value";
+    case errc::tag_mismatch:              return "tag_mismatch";
+    case errc::non_deterministic:         return "non_deterministic";
+    case errc::indefinite_in_borrowed_string: return "indefinite_in_borrowed_string";
     }
     return "?";
 }
@@ -272,6 +285,16 @@ inline std::string headline(error const& e) {
         h = "string contains escapes but "; h += e.context(); h += " borrows from the input"; break;
     case errc::non_text_key:
         h = "expected text key, found "; h += e.found(); break;
+    case errc::malformed_item:
+        h = e.detail().empty() ? "malformed item" : "malformed item: " + std::string(e.detail()); break;
+    case errc::unsupported_simple_value:
+        h = "unsupported simple value"; if (!e.detail().empty()) { h += ' '; h += e.detail(); } break;
+    case errc::tag_mismatch:
+        h = "tag mismatch"; if (!e.context().empty()) { h += " on "; h += q(e.context()); } break;
+    case errc::non_deterministic:
+        h = "non-deterministic encoding"; if (!e.detail().empty()) { h += ": "; h += e.detail(); } break;
+    case errc::indefinite_in_borrowed_string:
+        h = "indefinite-length string but "; h += e.context(); h += " borrows from the input"; break;
     }
     return h;
 }

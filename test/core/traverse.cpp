@@ -90,9 +90,9 @@ TEST_CASE("traverse: server exercises rename_all, name, flatten, inheritance, sk
     Server s;
     s.host_name = "h"; s.inner.x = 1;
     auto t = rec(s);
-    // conditional fields (skip_if_null / skip_if_default) → indefinite count
-    CHECK(t.front() == "{?");
-    CHECK(t == tokens{"{?",
+    // conditional fields (skip_if_null / skip_if_default) are counted before the map opens
+    CHECK(t.front() == "{9");
+    CHECK(t == tokens{"{9",
         "k:base_id", "i:0",
         "k:host-name", "t:h",
         "k:port", "u:8080",
@@ -174,7 +174,7 @@ struct Hooked {
 
 TEST_CASE("traverse: sink hooks — prepared keys, field-aware uint/bytes, write_prepared, format_traits") {
     auto t = rec<Hooked, hooked_sink>(Hooked{});
-    CHECK(t == tokens{"{6",
+    CHECK(t == tokens{"{o6",
         "pk:as_text", "t:5",
         "pk:plain", "u:6",
         "pk:promoted", "fb:3",
@@ -182,6 +182,47 @@ TEST_CASE("traverse: sink hooks — prepared keys, field-aware uint/bytes, write
         "pk:native", "fb:1",
         "pk:p", "prepared:P",
         "}"});
+}
+
+namespace {
+enum class Mode { off, on };
+struct [[=reversed_members]] Keyed {
+    [[=int_key_marker(1)]] int a = 1;
+    [[=int_key_marker(-7)]] std::string b = "b";
+    int c = 3;                                                 // text key
+    [[=tag_marker(1), =tag_marker(1000)]] std::uint32_t when = 5;
+    [[=tag_marker(2)]] std::optional<int> maybe;               // null carries no tag
+    [[=tag_marker(3)]] std::vector<int> items{1, 2};           // tag on the array, not the elements
+    [[=bulk_marker]] std::vector<double> samples{0.5, 1.5};
+    Mode mode = Mode::on;                                      // format default: integer
+    [[=vc::as_text]] Mode named = Mode::on;                    // core annotation wins
+};
+struct Plain { [[=int_key_marker(2)]] int x = 0; std::optional<int> o; };
+}
+
+TEST_CASE("traverse: v0.2 hooks — integer keys, member order, tags, enum default, bulk ranges") {
+    Keyed k; k.maybe = 9;
+    auto t = rec<Keyed, hooked_sink>(k);
+    CHECK(t == tokens{"{o9",
+        "pk:named", "t:on",
+        "pk:mode", "i:1",
+        "pk:samples", "bulk:2",
+        "pk:items", "tag:3", "[2", "i:1", "i:2", "]",
+        "pk:maybe", "tag:2", "i:9",
+        "pk:when", "tag:1", "tag:1000", "u:5",
+        "pk:c", "i:3",
+        "pik:-7", "t:b",
+        "pik:1", "i:1",
+        "}"});
+    Keyed empty; empty.maybe.reset();
+    auto t2 = rec<Keyed, hooked_sink>(empty);
+    auto it = std::find(t2.begin(), t2.end(), "pk:maybe");
+    REQUIRE(it != t2.end());
+    CHECK(*(it + 1) == "null");                                // no tag before a null
+    // the plain sink sees the same struct with text keys, declaration order, enum names
+    CHECK(rec<Plain>(Plain{}) == tokens{"{2", "k:x", "i:0", "k:o", "null", "}"});
+    CHECK(rec<Plain, hooked_sink>(Plain{}) == tokens{"{o2", "pik:2", "i:0", "pk:o", "null", "}"});
+    CHECK(rec(Mode::on) == tokens{"t:on"});
 }
 
 TEST_CASE("traverse: encode_error carries the member path") {

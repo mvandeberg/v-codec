@@ -7,6 +7,7 @@
 
 #include <vcodec/core/codec_for.hpp>
 #include <vcodec/core/concepts.hpp>
+#include <vcodec/core/keys.hpp>
 #include <vcodec/core/lookup.hpp>
 #include <vcodec/core/model.hpp>
 #include <vcodec/core/schema.hpp>
@@ -119,7 +120,7 @@ status decode_enum(R& r, E& out) {
     auto candidates = [&](error& e) {
         for (auto const& en : table) if (!en.skipped) e.with_candidate(en.name.view());
     };
-    if constexpr (enum_as_integer<E>) {
+    if constexpr (enum_encodes_as_integer<E, F, format_traits<format_of<R>>::enum_default_integer>) {
         U raw{};
         status st;
         if constexpr (std::is_signed_v<U>) st = decode_sint<F>(r, raw); else st = decode_uint<F>(r, raw);
@@ -464,9 +465,38 @@ consteval std::vector<char> deny_context() {
     return v;
 }
 
+// One member's value: expected tags are consumed before a present value, never before a null
+// for an empty optional; the bulk-range hook is tried for the whole member only.
+template<field_meta F, reader R, class M>
+status decode_field_value(R& r, M& m) {
+    if constexpr (optional_like<M>) {
+        if (r.peek() == kind::null) {
+            auto st = r.expect_null();
+            if (!st) return st;
+            m = M{};
+            return {};
+        }
+        auto& v = emplace_value(m);
+        return decode_field_value<F>(r, v);
+    } else {
+        constexpr auto tags = expected_tags_of<F, format_of<R>>;
+        if constexpr (!tags.empty()) {
+            auto st = r.expect_tags(tags);
+            if (!st) return st;
+        }
+        if constexpr (format_traits<format_of<R>>::template bulk_range<F, M>()
+                      && requires { { r.template read_range<F>(m) } -> std::same_as<result<bool>>; }) {
+            auto handled = r.template read_range<F>(m);
+            if (!handled) return fail(std::move(handled));
+            if (*handled) return {};
+        }
+        return decode_value<F>(r, m);
+    }
+}
+
 template<field_meta F, reader R, class T>
 status decode_field(R& r, T& out) {
-    return decode_value<F>(r, access<F>(out));
+    return decode_field_value<F>(r, access<F>(out));
 }
 
 // Decodes an object into a struct. `ignore_key` is the discriminator to skip when the struct
@@ -476,6 +506,7 @@ status decode_struct(R& r, T& out, std::string_view ignore_key = {}) {
     constexpr auto& ti = type_schema_of<T>;
     constexpr auto schema = schema_of<T>;
     constexpr auto& lut = lookup_of<T>;
+    constexpr auto& ikeys = key_table_of<T, format_of<R>>;
     constexpr std::size_t N = schema.size();
 
     if constexpr (ti.transparent) {
@@ -499,21 +530,52 @@ status decode_struct(R& r, T& out, std::string_view ignore_key = {}) {
         if (!more) return fail(std::move(more));
         if (!*more) break;
         std::size_t key_off = r.offset();
-        auto kt = c->key_text();
-        if (!kt) return fail(std::move(kt));
-        std::string_view key = kt->text;
-        std::size_t idx = lut.find(key);
+        std::string_view key;          // text key, or empty for an integer key
+        std::int64_t ikey = 0;
+        bool integer_key = false;
+        std::size_t idx = npos;
+        if constexpr (ikeys.any()) {
+            kind kk = c->key_kind();
+            if (kk == kind::uint || kk == kind::sint) {
+                integer_key = true;
+                if (kk == kind::uint) {
+                    auto ku = c->key_uint(); if (!ku) return fail(std::move(ku));
+                    if (*ku > static_cast<std::uint64_t>(INT64_MAX)) {
+                        auto st = r.skip_value(); if (!st) return st;
+                        if constexpr (ti.deny_unknown_fields) {
+                            error e = r.error(errc::unknown_field, key_off).with_detail(decimal(*ku)).with_context(ti.name.view()).with_deny_unknown();
+                            e.push_key(*ku);
+                            return std::unexpected(std::move(e));
+                        }
+                        continue;
+                    }
+                    ikey = static_cast<std::int64_t>(*ku);
+                } else {
+                    auto ki = c->key_sint(); if (!ki) return fail(std::move(ki));
+                    ikey = *ki;
+                }
+                idx = ikeys.find(ikey);
+            }
+        }
+        if (!integer_key) {
+            auto kt = c->key_text();
+            if (!kt) return fail(std::move(kt));
+            key = kt->text;
+            idx = lut.find(key);
+        }
 
         if (idx == npos) {
-            if (!ignore_key.empty() && key == ignore_key) {
+            if (!integer_key && !ignore_key.empty() && key == ignore_key) {
                 auto st = r.skip_value(); if (!st) return st;
                 continue;
             }
             if constexpr (ti.deny_unknown_fields) {
-                error e = r.error(errc::unknown_field, key_off).with_detail(key).with_length(key.size() + 2)
-                              .with_context(ti.name.view()).with_deny_unknown();
-                if (auto s = suggest(key, schema); !s.empty()) e.with_suggestion(s);
-                e.push_key(key);
+                error e = integer_key
+                    ? r.error(errc::unknown_field, key_off).with_detail(decimal(ikey)).with_context(ti.name.view()).with_deny_unknown()
+                    : r.error(errc::unknown_field, key_off).with_detail(key).with_length(key.size() + 2)
+                        .with_context(ti.name.view()).with_deny_unknown();
+                if (!integer_key) { if (auto s = suggest(key, schema); !s.empty()) e.with_suggestion(s); }
+                if (integer_key) e.push_key(static_cast<std::uint64_t>(ikey)); else e.push_key(key);
                 if constexpr (collecting<R>) {
                     r.collected().push_back(std::move(e));
                     auto st = r.skip_value(); if (!st) return st;
@@ -534,8 +596,10 @@ status decode_struct(R& r, T& out, std::string_view ignore_key = {}) {
 
         if (seen[idx]) {
             if constexpr (R::duplicates == duplicate_key::error) {
-                error e = r.error(errc::duplicate_key, key_off).with_detail(key).with_length(key.size() + 2);
-                e.push_key(key);
+                error e = integer_key
+                    ? r.error(errc::duplicate_key, key_off).with_detail(decimal(ikey))
+                    : r.error(errc::duplicate_key, key_off).with_detail(key).with_length(key.size() + 2);
+                if (integer_key) e.push_key(static_cast<std::uint64_t>(ikey)); else e.push_key(key);
                 if constexpr (collecting<R>) {
                     r.collected().push_back(std::move(e));
                     auto st = r.skip_value(); if (!st) return st;
@@ -588,6 +652,7 @@ status decode_struct(R& r, T& out, std::string_view ignore_key = {}) {
                     if (missing) {
                         error e = r.error(errc::missing_field, obj_off).with_detail(fi.wire_name.view())
                                       .with_container_offset(obj_off).with_context(ti.name.view());
+                        if constexpr (ikeys.any()) { if (ikeys.keys[fi.member_index].present) e.with_expected(decimal(ikeys.keys[fi.member_index].value)); }
                         if constexpr (collecting<R>) r.collected().push_back(std::move(e));
                         else missing = std::unexpected(std::move(e));
                     }
@@ -762,7 +827,7 @@ status decode_value(R& r, T& out) {
 // Top-level entry: finalizes every error's path into root-first order.
 template<reader R, class T>
 status decode(R& r, T& out) {
-    auto st = decode_value<no_field>(r, out);
+    auto st = decode_field_value<no_field>(r, out);
     if (!st) st.error().finalize();
     if constexpr (collecting<R>) for (auto& e : r.collected()) e.finalize();
     return st;

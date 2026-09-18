@@ -375,6 +375,65 @@ TEST_CASE("build: collect mode records missing fields and unknown fields, and st
     CHECK(st.error().code() == vc::errc::truncated);
 }
 
+namespace {
+struct mock_reader_format_tag {};
+enum class Mode { off, on };
+struct Keyed {
+    [[=int_key_marker(1)]] int a = 0;
+    [[=int_key_marker(-7)]] std::string b;
+    int c = 0;
+    [[=tag_marker(1)]] std::uint32_t when = 0;
+    [[=tag_marker(2)]] std::optional<int> maybe;
+    [[=bulk_marker]] std::vector<int> samples;
+    Mode mode = Mode::off;
+    [[=vc::as_text]] Mode named = Mode::off;
+};
+}
+
+TEST_CASE("build: v0.2 hooks — integer keys, tags, enum default, bulk ranges") {
+    using mreader = token_reader<vc::duplicate_key::last_wins, vc::error_mode::fail_fast, mock_format>;
+    auto dec_m = [](std::vector<tok> toks) {
+        mreader r(std::move(toks)); Keyed out{};
+        auto st = vc::core::decode(r, out);
+        return std::pair{ st, out };
+    };
+    auto [st, k] = dec_m({t_map(),
+        t_uint(1), t_sint(-5),                 // integer key 1
+        t_sint(-7), t_text("bee"),             // negative integer key
+        t_key("c"), t_uint(3),                 // text key still works for unkeyed members
+        t_key("when"), t_tag(1), t_uint(7),
+        t_key("maybe"), t_null(),              // null without a tag
+        t_key("samples"), t_text("bulk"), t_uint(3),
+        t_key("mode"), t_uint(1),              // integer enum by format default
+        t_key("named"), t_text("on"),
+        t_end_map()});
+    REQUIRE(st);
+    CHECK(k.a == -5); CHECK(k.b == "bee"); CHECK(k.c == 3); CHECK(k.when == 7);
+    CHECK_FALSE(k.maybe); CHECK(k.samples == std::vector<int>{0, 1, 2});
+    CHECK(k.mode == Mode::on); CHECK(k.named == Mode::on);
+
+    auto [st2, k2] = dec_m({t_map(), t_sint(-7), t_text("b"), t_key("maybe"), t_tag(2), t_uint(4), t_key("samples"), t_arr(), t_uint(9), t_end_arr(), t_end_map()});
+    REQUIRE(st2);
+    CHECK(k2.maybe == 4);                       // tag verified before a present value
+    CHECK(k2.samples == std::vector<int>{9});   // bulk hook declined, element-wise path used
+
+    auto [st3, k3] = dec_m({t_map(), t_sint(-7), t_text("b"), t_key("samples"), t_arr(), t_end_arr(), t_key("when"), t_uint(7), t_end_map()});
+    REQUIRE_FALSE(st3);
+    CHECK(st3.error().code() == vc::errc::tag_mismatch);
+    CHECK(st3.error().found() == "no tag");
+    CHECK(path_of(st3.error()) == "$.when");
+
+    auto [st4, k4] = dec_m({t_map(), t_sint(-7), t_text("b"), t_key("samples"), t_arr(), t_end_arr(), t_uint(1), t_uint(1), t_uint(1), t_uint(2), t_end_map()});   // duplicate integer key: last wins
+    REQUIRE(st4);
+    CHECK(k4.a == 2);
+
+    // integer keys have no meaning for a format without the hook: the token reader with the
+    // default (void) format only knows text keys, and 1 is an unknown key → skipped
+    struct Loose { [[=int_key_marker(1)]] int a = 0; };
+    auto r = dec<Loose>({t_map(), t_key("a"), t_uint(5), t_end_map()});
+    CHECK(r.value().a == 5);
+}
+
 TEST_CASE("build: path truncation keeps the deepest 16 steps") {
     struct N16 { std::vector<N16> kids; std::uint8_t leaf = 0; };
     std::vector<tok> toks;

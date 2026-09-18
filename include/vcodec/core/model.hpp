@@ -11,9 +11,11 @@
 
 #include <concepts>
 #include <cstddef>
+#include <vector>
 #include <cstdint>
 #include <optional>
 #include <span>
+#include <string>
 #include <string_view>
 
 namespace vcodec::core {
@@ -128,12 +130,11 @@ concept collecting_reader = reader<R> && requires(R& r) {
 
 // ---- format hooks -----------------------------------------------------------------------
 //
-// core/ knows no format. Where a format's annotations change how a member is classified or
-// whether it can be lowered, core asks format_traits<Format>. Formats specialise this; the
-// primary is the CBOR-shaped default (everything in the model is representable natively).
+// core/ knows no format. Where a format's annotations change how a member is classified,
+// keyed, tagged or ordered, core asks format_traits<Format>. Formats specialise it, inheriting
+// format_traits_defaults so that a hook they do not care about keeps the v0.1 behaviour.
 
-template<class Format>
-struct format_traits {
+struct format_traits_defaults {
     static constexpr std::string_view name = "this format";
 
     // Is this member a byte string? Default: only std::byte ranges.
@@ -148,10 +149,45 @@ struct format_traits {
     template<field_meta F, class K>
     static consteval bool can_lower_key() { return true; }
 
+    // Integer key for a struct member, or nullopt for its text name (v0.2).
+    template<field_meta F>
+    static consteval std::optional<std::int64_t> integer_key() { return std::nullopt; }
+
+    // Emission order of a struct's N members: a permutation of [0, N). Identity by default.
+    template<class T>
+    static consteval std::vector<std::size_t> member_order(std::size_t n) {
+        std::vector<std::size_t> v(n);
+        for (std::size_t i = 0; i < n; ++i) v[i] = i;
+        return v;
+    }
+
+    // Tags that must precede this member's value, outermost first. None by default.
+    template<field_meta F>
+    static consteval std::vector<std::uint64_t> expected_tags() { return {}; }
+
+    // Whether enums encode as integers when the member carries neither as_integer nor as_text.
+    static constexpr bool enum_default_integer = false;
+
+    // Whether the format wants the bulk-range hooks (write_range / read_range) tried before
+    // element-wise traversal for this member.
+    template<field_meta F, class R>
+    static consteval bool bulk_range() { return false; }
+
+    // Format-specific audit checks: return a §10 message (without the member path, which the
+    // audit prepends) or an empty string when the member / type is fine.
+    template<field_meta F, class T>
+    static consteval std::string check_field() { return {}; }
+    template<class T>
+    static consteval std::string check_type() { return {}; }
+
     // Diagnostic hints appended to §10 messages.
     static constexpr std::string_view bytes_hint = "";
     static constexpr std::string_view key_hint = "";
+    static constexpr std::string_view integer_key_spelling = "integer key";
 };
+
+template<class Format>
+struct format_traits : format_traits_defaults {};
 
 namespace detail {
 template<class S> struct format_of_impl { using type = void; };

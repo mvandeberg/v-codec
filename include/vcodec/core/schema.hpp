@@ -559,6 +559,26 @@ consteval bool enum_as_integer_of() {
 }
 template<class E> inline constexpr bool enum_as_integer = enum_as_integer_of<E>();
 
+template<class E>
+consteval bool enum_as_text_of() {
+    return has_annotation<as_text_t>(detail::type_annotations_of<std::remove_cvref_t<E>>());
+}
+template<class E> inline constexpr bool enum_as_text = enum_as_text_of<E>();
+
+// The effective encoding of an enum under a format: a member-level as_integer / as_text wins,
+// then the enum type's own annotation, then the format's default (§11 rule 4: defaults may
+// differ, semantics may not).
+template<class E, field_meta F, bool FormatDefaultInteger>
+consteval bool enum_encodes_as_integer_of() {
+    if (has_annotation<as_integer_t>(F.anns())) return true;
+    if (has_annotation<as_text_t>(F.anns())) return false;
+    if (enum_as_integer<E>) return true;
+    if (enum_as_text<E>) return false;
+    return FormatDefaultInteger;
+}
+template<class E, field_meta F, bool FormatDefaultInteger>
+inline constexpr bool enum_encodes_as_integer = enum_encodes_as_integer_of<E, F, FormatDefaultInteger>();
+
 // ---- variant alternatives (§5.3 tag) ----------------------------------------------------------
 //
 // An alternative is named by a type-level name("…") annotation (source or describe<A>), else

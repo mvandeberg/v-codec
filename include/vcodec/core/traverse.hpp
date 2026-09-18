@@ -12,6 +12,7 @@
 
 #include <vcodec/core/codec_for.hpp>
 #include <vcodec/core/concepts.hpp>
+#include <vcodec/core/keys.hpp>
 #include <vcodec/core/model.hpp>
 #include <vcodec/core/schema.hpp>
 
@@ -64,6 +65,17 @@ void emit_key(S& s) {
     if constexpr (requires { s.template prepared_key<Name>(); }) s.template prepared_key<Name>();
     else s.key(Name.view());
 }
+template<std::int64_t Key, sink S>
+void emit_int_key(S& s) {
+    if constexpr (requires { s.template prepared_key<Key>(); }) s.template prepared_key<Key>();
+    else s.key(Key);
+}
+// Tags a format expects before a member's value (from format_traits::expected_tags).
+template<field_meta F, sink S>
+void emit_tags(S& s) {
+    constexpr auto tags = expected_tags_of<F, format_of<S>>;
+    if constexpr (!tags.empty()) for (auto t : tags) s.tag(t);
+}
 
 // ---- path-carrying rethrow -----------------------------------------------------------------
 
@@ -88,7 +100,7 @@ VCODEC_ALWAYS_INLINE void with_key_path(std::string_view k, Fn&& fn) {
 template<field_meta F, sink S, enum_type E>
 void encode_enum(S& s, E v) {
     using U = std::underlying_type_t<E>;
-    if constexpr (enum_as_integer<E>) {
+    if constexpr (enum_encodes_as_integer<E, F, format_traits<format_of<S>>::enum_default_integer>) {
         if constexpr (std::is_signed_v<U>) call_sint<F>(s, static_cast<std::int64_t>(static_cast<U>(v)));
         else                               call_uint<F>(s, static_cast<std::uint64_t>(static_cast<U>(v)));
         return;
@@ -118,11 +130,31 @@ consteval std::size_t serialized_field_count() {
     return n;
 }
 
-// Emits the members of a struct into an already-open map. `tag_key`/`tag_value` are the
-// discriminator entry for an internally-tagged variant alternative, or empty.
+// The value of one member: tags apply to the value when present, never to a null from an
+// empty optional, and never to a container's elements (F propagates into elements without
+// re-emitting tags because emission happens here, once per member).
+template<field_meta F, sink S, class M>
+void encode_field_value(S& s, M const& m) {
+    if constexpr (optional_like<M>) {
+        if (m) encode_field_value<F>(s, *m); else s.null();
+    } else {
+        emit_tags<F>(s);
+        if constexpr (format_traits<format_of<S>>::template bulk_range<F, M>()
+                      && requires { s.template write_range<F>(m); }) {
+            s.template write_range<F>(m);
+        } else {
+            encode_value<F>(s, m);
+        }
+    }
+}
+
+// Emits the members of a struct into an already-open map, in the format's member order,
+// with the format's keys.
 template<sink S, reflectable_class T>
 void encode_members(S& s, T const& v) {
-    template for (constexpr auto f : fields_of<T>) {
+    using Fmt = format_of<S>;
+    template for (constexpr auto idx : member_order_of<T, Fmt>) {
+        constexpr auto f = fields_of<T>[idx];
         if constexpr (!f.info.skip_serializing()) {
             constexpr field_info fi = f.info;
             auto const& m = access<f>(v);
@@ -135,12 +167,18 @@ void encode_members(S& s, T const& v) {
                 if (m == access<f>(defaults)) emit = false;
             }
             if (emit) {
-                emit_key<fi.wire_name>(s);
-                with_member_path(fi.identifier.view(), [&] { encode_value<f>(s, m); });
+                constexpr auto ik = format_traits<Fmt>::template integer_key<f>();
+                if constexpr (ik.has_value()) emit_int_key<*ik>(s);
+                else emit_key<fi.wire_name>(s);
+                with_member_path(fi.identifier.view(), [&] { encode_field_value<f>(s, m); });
             }
         }
     }
 }
+
+// Number of members that will be emitted when no member is conditionally skipped.
+template<class T>
+consteval std::size_t serialized_field_count_of() { return serialized_field_count<T>(); }
 
 template<field_meta F, sink S, reflectable_class T>
 void encode_struct(S& s, T const& v, std::string_view tag_key = {}, std::string_view tag_value = {}) {
@@ -154,7 +192,23 @@ void encode_struct(S& s, T const& v, std::string_view tag_key = {}, std::string_
     }
     std::optional<std::size_t> n;
     if constexpr (!ti.conditional_fields) n = serialized_field_count<T>() + (tag_key.empty() ? 0 : 1);
-    s.begin_map(n);
+    else {
+        // Conditional members: count what will actually be emitted so formats that need a
+        // definite length (deterministic CBOR) never have to buffer a struct.
+        std::size_t k = tag_key.empty() ? 0 : 1;
+        template for (constexpr auto f : fields_of<T>) {
+            if constexpr (!f.info.skip_serializing()) {
+                auto const& m = access<f>(v);
+                bool emit = true;
+                if constexpr (has(f.info.flags, field_flags::skip_if_null)) { if constexpr (optional_like<decltype(m)>) emit = static_cast<bool>(m); }
+                if constexpr (has(f.info.flags, field_flags::skip_if_default)) { static const T defaults{}; if (m == access<f>(defaults)) emit = false; }
+                if (emit) ++k;
+            }
+        }
+        n = k;
+    }
+    // A struct's members arrive in the format's own order: a sink that sorts maps may skip it.
+    if constexpr (requires { s.begin_map_ordered(n); }) s.begin_map_ordered(n); else s.begin_map(n);
     if (!tag_key.empty()) { s.key(tag_key); s.text(tag_value); }
     encode_members(s, v);
     s.end_map();
@@ -285,7 +339,7 @@ void encode_value(S& s, T const& v) {
 // Top-level entry. Finalizes the path on any encode_error before rethrowing.
 template<sink S, class T>
 void encode(S& s, T const& v) {
-    try { encode_value<no_field>(s, v); }
+    try { encode_field_value<no_field>(s, v); }
     catch (encode_error& e) { e.finalize(); throw; }
 }
 

@@ -9,6 +9,8 @@
 
 #include <catch2/catch_test_macros.hpp>
 
+#include <forward_list>
+
 using namespace vcodec_test;
 using tokens = std::vector<std::string>;
 
@@ -67,13 +69,17 @@ TEST_CASE("cross rule 4: per-format defaults may differ — CBOR takes bytes and
 }
 
 TEST_CASE("cross: definite lengths where core knows them, indefinite where it does not") {
-    // Kitchen has no conditional members → definite map; Server has skip_if_null → indefinite.
+    // Structs are always counted, conditional members included; unsized ranges are not.
     CHECK((static_cast<unsigned char>(cbor(Point{}).front()) >> 5) == 5);
     CHECK((static_cast<unsigned char>(cbor(Point{}).front()) & 31) == 2);
-    CHECK(static_cast<unsigned char>(cbor(Server{}).front()) == 0xBF);
-    CHECK(static_cast<unsigned char>(cbor(Server{}).back()) == 0xFF);
+    Server s; s.cert_path = "c";
+    CHECK(static_cast<unsigned char>(cbor(Server{}).front()) == 0xA9);   // 9 members emitted
+    CHECK(static_cast<unsigned char>(cbor(s).front()) == 0xAA);          // 10 with cert-path present
     std::list<int> l{1, 2, 3};
-    CHECK(static_cast<unsigned char>(cbor(l).front()) == 0x83);       // std::list is sized
+    CHECK(static_cast<unsigned char>(cbor(l).front()) == 0x83);          // std::list is sized
+    std::forward_list<int> fl{1, 2};
+    CHECK(static_cast<unsigned char>(cbor(fl).front()) == 0x9F);         // not sized → indefinite
+    CHECK(static_cast<unsigned char>(cbor(fl).back()) == 0xFF);
 }
 
 TEST_CASE("cross rule 5: encode-side failures speak in member terms in every format") {

@@ -3,6 +3,9 @@
 #pragma once
 #include <vcodec/core/model.hpp>
 
+#include "recording_sink.hpp"
+
+#include <span>
 #include <string>
 #include <vector>
 
@@ -36,11 +39,12 @@ inline tok t_end_arr()            { return mk(kind::array, true); }
 inline tok t_map()                { return mk(kind::map); }
 inline tok t_end_map()            { return mk(kind::map, true); }
 inline tok t_key(std::string s)   { return t_text(std::move(s)); }
+inline tok t_tag(std::uint64_t t) { auto k = mk(kind::tag); k.u = t; return k; }
 
-template<vc::duplicate_key Dup = vc::duplicate_key::last_wins, vc::error_mode Errs = vc::error_mode::fail_fast>
+template<vc::duplicate_key Dup = vc::duplicate_key::last_wins, vc::error_mode Errs = vc::error_mode::fail_fast, class Format = void>
 class token_reader {
 public:
-    using format = void;
+    using format = Format;
     static constexpr vc::duplicate_key duplicates = Dup;
     static constexpr vc::error_mode errors = Errs;
 
@@ -55,6 +59,30 @@ public:
     void restore(std::size_t p) noexcept { pos_ = p; }
 
     kind peek() const noexcept { return pos_ < toks_.size() ? toks_[pos_].k : kind::undefined; }
+
+    // Tags: consumed only when expected; an unexpected one is a mismatch.
+    vc::status expect_tags(std::span<const std::uint64_t> expected) {
+        for (auto t : expected) {
+            if (pos_ >= toks_.size()) return std::unexpected(vc::error(vc::errc::truncated, pos_));
+            if (toks_[pos_].k != kind::tag || toks_[pos_].u != t)
+                return std::unexpected(vc::error(vc::errc::tag_mismatch, pos_).with_expected("tag " + std::to_string(t))
+                    .with_found(toks_[pos_].k == kind::tag ? "tag " + std::to_string(toks_[pos_].u) : std::string("no tag")));
+            ++pos_;
+        }
+        return {};
+    }
+    // Bulk range: a "bulk" text token followed by the element count, else not handled.
+    template<vc::core::field_meta F, class R>
+    vc::result<bool> read_range(R& out) {
+        if (pos_ < toks_.size() && toks_[pos_].k == kind::text && toks_[pos_].s == "bulk") {
+            ++pos_;
+            auto n = expect_uint(); if (!n) return std::unexpected(std::move(n.error()));
+            out.clear();
+            for (std::uint64_t i = 0; i < *n; ++i) out.push_back(typename R::value_type(i));
+            return true;
+        }
+        return false;
+    }
 
     vc::status expect_null() { if (auto e = check(kind::null, "null")) return std::unexpected(*e); ++pos_; return {}; }
     vc::result<bool> expect_boolean() { if (auto e = check(kind::boolean, "boolean")) return std::unexpected(*e); return toks_[pos_++].b; }
@@ -106,7 +134,7 @@ public:
             if (r->toks_[r->pos_].end) { ++r->pos_; return false; }
             return true;
         }
-        kind key_kind() const { return r->peek(); }
+        kind key_kind() const { return r->peek(); }   // text, uint or sint keys
         vc::result<vc::core::text_ref> key_text() { return r->expect_text(); }
         vc::result<std::uint64_t> key_uint() { return r->expect_uint(); }
         vc::result<std::int64_t> key_sint() { return r->expect_sint(); }

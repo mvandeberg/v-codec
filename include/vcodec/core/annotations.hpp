@@ -81,6 +81,8 @@ consteval tag_t tag(std::string_view s) { return tag_t{ core::intern(s) }; }
 // ---- enum level -------------------------------------------------------------------------
 
 struct as_integer_t {};           inline constexpr as_integer_t as_integer{};
+// as_text: encode an enum by name even where the format's default is the integer (CBOR).
+struct as_text_t {};              inline constexpr as_text_t    as_text{};
 
 // ---- reflection helpers -----------------------------------------------------------------
 

@@ -11,6 +11,7 @@
 #include <vcodec/core/codec_for.hpp>
 #include <vcodec/core/concepts.hpp>
 #include <vcodec/core/fixed_string.hpp>
+#include <vcodec/core/keys.hpp>
 #include <vcodec/core/model.hpp>
 #include <vcodec/core/schema.hpp>
 
@@ -123,6 +124,10 @@ consteval void audit_struct(audit_state& st, std::string const& path) {
                 st.fail(msg_needs_tag(member_path, type_str(f.type), type_name_of(^^T)));
                 return;
             }
+        }
+        if (auto m = format_traits<Format>::template check_field<f, M>(); !m.empty()) {
+            st.fail(member_path + " (" + type_str(f.type) + ")\n  " + m);
+            return;
         }
         audit_type<M, Format, f>(st, member_path);
     }

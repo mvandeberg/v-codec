@@ -9,7 +9,7 @@
 namespace vcodec::core {
 
 template<>
-struct format_traits<json::format> {
+struct format_traits<json::format> : format_traits_defaults {
     static constexpr std::string_view name = "JSON";
 
     // std::byte ranges are bytes; std::uint8_t ranges are bytes only with json::bytes(...).
