@@ -271,7 +271,10 @@ inline std::string headline(error const& e) {
     case errc::truncated:           h = "unexpected end of input"; break;
     case errc::type_mismatch:
         h = "expected "; h += e.expected(); h += ", found "; h += e.found(); break;
-    case errc::missing_field:       h = "missing required field " + q(e.detail()); break;
+    case errc::missing_field:
+        h = "missing required field " + q(e.detail());
+        if (!e.expected().empty()) { h += " (key "; h += e.expected(); h += ")"; }
+        break;
     case errc::unknown_field:       h = "unknown field " + q(e.detail()); break;
     case errc::duplicate_key:       h = "duplicate key " + q(e.detail()); break;
     case errc::out_of_range:

@@ -3,6 +3,8 @@
 #pragma once
 #include <vcodec/core/lower.hpp>
 
+#include <cstring>
+
 #include <bit>
 #include <cstdint>
 #include <stdexcept>
@@ -59,6 +61,8 @@ private:
             if (ai == 20) out_.push_back("false");
             else if (ai == 21) out_.push_back("true");
             else if (ai == 22) out_.push_back("null");
+            else if (ai == 25) { std::uint16_t v = 0; for (int i = 0; i < 2; ++i) v = static_cast<std::uint16_t>((v << 8) | byte()); out_.push_back("r:" + std::to_string(vcodec::core::from_half(v))); }
+            else if (ai == 26) { std::uint32_t v = 0; for (int i = 0; i < 4; ++i) v = (v << 8) | byte(); out_.push_back("r:" + std::to_string(double(std::bit_cast<float>(v)))); }
             else if (ai == 27) { std::uint64_t v = 0; for (int i = 0; i < 8; ++i) v = (v << 8) | byte(); out_.push_back("r:" + std::to_string(std::bit_cast<double>(v))); }
             else throw std::runtime_error("unsupported simple value");
             break;

@@ -20,6 +20,7 @@ namespace vcodec::core {
 struct int_key {
     bool         present = false;
     std::int64_t value = 0;
+    bool         text_ok = true;     // the text name is also accepted on decode
 };
 
 struct int_key_entry {
@@ -79,9 +80,9 @@ consteval key_table build_key_table() {
                 }
             }
             entries.push_back({ *k, static_cast<std::uint32_t>(fi.member_index) });
-            keys.push_back({ true, *k });
+            keys.push_back({ true, *k, format_traits<Format>::template accepts_text_key<f>() });
         } else {
-            keys.push_back({ false, 0 });
+            keys.push_back({ false, 0, true });
         }
     }
     auto ks = std::define_static_array(keys);
@@ -116,13 +117,13 @@ template<class T, class Format>
 inline constexpr std::span<const std::size_t> member_order_of = build_member_order<T, Format>();
 
 // Tags expected before a member's value.
-template<field_meta F, class Format>
+template<field_meta F, class T, class Format>
 consteval std::span<const std::uint64_t> build_expected_tags() {
-    auto v = format_traits<Format>::template expected_tags<F>();
+    auto v = format_traits<Format>::template expected_tags<F, std::remove_cvref_t<T>>();
     return std::define_static_array(v);
 }
-template<field_meta F, class Format>
-inline constexpr std::span<const std::uint64_t> expected_tags_of = build_expected_tags<F, Format>();
+template<field_meta F, class T, class Format>
+inline constexpr std::span<const std::uint64_t> expected_tags_of = build_expected_tags<F, T, Format>();
 
 } // namespace vcodec::core
 

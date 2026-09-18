@@ -14,7 +14,7 @@ target_compile_options(vcodec INTERFACE
 option(VCODEC_BUILD_TESTS      "Build tests"       ${PROJECT_IS_TOP_LEVEL})
 option(VCODEC_BUILD_BENCHMARKS "Build benchmarks"  OFF)
 option(VCODEC_BUILD_FUZZERS    "Build fuzzers"     OFF)
-option(VCODEC_BUILD_SPIKE      "Build CBOR spike"  OFF)
+option(VCODEC_BUILD_CBOR       "Include the CBOR backend in tests and benchmarks" ON)
 option(VCODEC_SANITIZE         "Build tests with ASan+UBSan" OFF)
 
 # Structural rule 1: core/ must not include json/, cbor/ or spike/. Checked at configure

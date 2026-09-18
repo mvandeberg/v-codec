@@ -1,7 +1,6 @@
 // Spec §11: cross-format consistency rules, asserted from v0.1 against the CBOR spike.
 // Rules that exist only in prose stop being true.
-#include <vcodec/core/traverse.hpp>
-#include <spike/cbor_write.hpp>
+#include <vcodec/vcodec.hpp>
 
 #include "cbor_dump.hpp"
 #include "recording_sink.hpp"
@@ -15,14 +14,28 @@ using namespace vcodec_test;
 using tokens = std::vector<std::string>;
 
 namespace {
-template<class T> std::string cbor(T const& v) { vcodec_spike::cbor_sink s; vc::core::encode(s, v); return s.out; }
-// The model carries C++ signedness (sint(5) for an `int` 5); CBOR collapses non-negative
-// values to major type 0. That is a lowering, so comparisons normalise non-negative i: → u:.
+// Non-deterministic, declaration-order-independent output is what the model comparison wants;
+// the deterministic mode reorders struct members and is covered in test/cbor.
+constexpr vc::cbor::options plain{ .deterministic = false };
+template<class T> std::string cbor(T const& v) {
+    std::vector<std::byte> out; vc::cbor::writer<plain> s(out); vc::core::encode(s, v);
+    return std::string(reinterpret_cast<const char*>(out.data()), out.size());
+}
+// The recording sink declares itself a CBOR sink so core orders members and keys the way it
+// does for the real writer; only the serialisation differs. The model carries C++ signedness
+// (sint(5) for an `int` 5) and CBOR collapses non-negative values to major type 0 — a
+// lowering, so comparisons normalise non-negative i: → u:.
+struct cbor_recording_sink : recording_sink { using format = vc::cbor::format; };
 template<class T> tokens model(T const& v) {
-    recording_sink s; vc::core::encode(s, v);
-    for (auto& t : s.tokens) if (t.starts_with("i:") && t[2] != '-') t = "u:" + t.substr(2);
+    cbor_recording_sink s; vc::core::encode(s, v);
+    for (auto& t : s.tokens) {
+        if (t.starts_with("i:") && t[2] != '-') t = "u:" + t.substr(2);
+        if (t.starts_with("{o")) t = "{" + t.substr(2);
+    }
     return s.tokens;
 }
+// Declaration order, text keys, enum names: what JSON sees.
+template<class T> tokens json_model(T const& v) { recording_sink s; vc::core::encode(s, v); return s.tokens; }
 std::string hex(std::string_view s) { std::string h; vc::core::hex_encode(std::as_bytes(std::span(s)), h); return h; }
 
 struct IntKeyed { std::map<std::uint32_t, std::string> by_id{{1, "a"}, {300, "b"}}; };
@@ -30,14 +43,14 @@ struct Binary { std::vector<std::byte> blob{std::byte{0xDE}, std::byte{0xAD}}; s
 struct Mixed { std::int64_t neg = -500; std::uint64_t big = 1ull << 40; double d = 1.5; bool b = true; std::optional<int> none; };
 }
 
-TEST_CASE("cross: the spike encodes the §7 type set with RFC 8949 bytes") {
+TEST_CASE("cross: the CBOR writer encodes the §7 type set with RFC 8949 bytes") {
     CHECK(hex(cbor(0u)) == "00");
     CHECK(hex(cbor(23u)) == "17");
     CHECK(hex(cbor(24u)) == "1818");
     CHECK(hex(cbor(1000u)) == "1903e8");
     CHECK(hex(cbor(-1)) == "20");
     CHECK(hex(cbor(-500)) == "3901f3");
-    CHECK(hex(cbor(1.5)) == "fb3ff8000000000000");
+    CHECK(hex(cbor(1.5)) == "f93e00");                 // preferred float serialization
     CHECK(hex(cbor(true)) == "f5");
     CHECK(hex(cbor(std::optional<int>{})) == "f6");
     CHECK(hex(cbor(std::string("IETF"))) == "6449455446");
@@ -66,6 +79,16 @@ TEST_CASE("cross rule 4: per-format defaults may differ — CBOR takes bytes and
     CHECK(cbor_dumper::dump(cbor(Binary{})) == model(Binary{}));
     CHECK(model(IntKeyed{}) == tokens{"{1", "k:by_id", "{2", "ku:1", "t:a", "ku:300", "t:b", "}", "}"});
     CHECK(cbor_dumper::dump(cbor(IntKeyed{})) == model(IntKeyed{}));
+    // Enum default differs per format; the value is the same enumerator (rule 4, not rule 3).
+    CHECK(json_model(Color::red) == tokens{"t:bright-red"});
+    CHECK(model(Color::red) == tokens{"u:0"});
+    // The set of struct members and their values is identical; only order and key form differ.
+    struct K { [[=vc::cbor::key(1)]] int a = 1; int b = 2; };
+    CHECK(json_model(K{}) == tokens{"{2", "k:a", "i:1", "k:b", "i:2", "}"});
+    CHECK(model(K{}) == tokens{"{2", "ki:1", "u:1", "k:b", "u:2", "}"});
+    STATIC_CHECK(!vc::json::encodable<Binary>);
+    STATIC_CHECK(vc::cbor::encodable<Binary>);
+    STATIC_CHECK(vc::cbor_only<Binary>);
 }
 
 TEST_CASE("cross: definite lengths where core knows them, indefinite where it does not") {
@@ -97,7 +120,7 @@ TEST_CASE("cross rule 5: encode-side failures speak in member terms in every for
 }
 
 TEST_CASE("cross: the prepared_key hook is format-agnostic") {
-    // Point's keys "x" and "y" go through cbor_sink::prepared_key<Name>; the bytes are the
-    // same as the runtime path would produce.
+    // Point's keys "x" and "y" go through writer::prepared_key<Name>; the bytes are the same
+    // as the runtime path would produce.
     CHECK(hex(cbor(Point{1, 2})) == "a2617801617902");
 }

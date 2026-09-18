@@ -153,6 +153,10 @@ struct format_traits_defaults {
     template<field_meta F>
     static consteval std::optional<std::int64_t> integer_key() { return std::nullopt; }
 
+    // Whether a member that has an integer key also accepts its text name on decode.
+    template<field_meta F>
+    static consteval bool accepts_text_key() { return true; }
+
     // Emission order of a struct's N members: a permutation of [0, N). Identity by default.
     template<class T>
     static consteval std::vector<std::size_t> member_order(std::size_t n) {
@@ -161,17 +165,27 @@ struct format_traits_defaults {
         return v;
     }
 
-    // Tags that must precede this member's value, outermost first. None by default.
-    template<field_meta F>
+    // Tags that must precede this member's value (T is the value's type, optionals unwrapped),
+    // outermost first. None by default.
+    template<field_meta F, class T>
     static consteval std::vector<std::uint64_t> expected_tags() { return {}; }
 
     // Whether enums encode as integers when the member carries neither as_integer nor as_text.
     static constexpr bool enum_default_integer = false;
 
+    // Whether a std::span<const std::byte> member can be decoded by borrowing from the input
+    // (true for binary formats whose byte strings are contiguous and unescaped).
+    static constexpr bool bytes_borrowable = false;
+
     // Whether the format wants the bulk-range hooks (write_range / read_range) tried before
     // element-wise traversal for this member.
     template<field_meta F, class R>
     static consteval bool bulk_range() { return false; }
+
+    // Whether read_range should also be offered a member that did not ask for bulk encoding
+    // (CBOR: any numeric range may arrive as an RFC 8746 typed array).
+    template<class R>
+    static consteval bool accepts_bulk_range() { return false; }
 
     // Format-specific audit checks: return a §10 message (without the member path, which the
     // audit prepends) or an empty string when the member / type is fine.

@@ -27,6 +27,7 @@ struct rng {
 };
 
 template<class T> T generate(rng& g);
+template<class T> bool equal(T const& a, T const& b);
 
 namespace detail {
 
@@ -124,12 +125,18 @@ T generate(rng& g) {
         return out;
     }
     else if constexpr (map_like<T>) {
+        // Keys are unique even for a range of pairs: deterministic formats reject duplicates.
         T out{};
         if (g.depth > 6) return out;
         std::size_t n = g.below(4);
         ++g.depth;
-        for (std::size_t i = 0; i < n; ++i)
-            insert_into(out, generate<map_key_t<T>>(g), generate<map_mapped_t<T>>(g));
+        for (std::size_t i = 0; i < n; ++i) {
+            auto k = generate<map_key_t<T>>(g);
+            bool dup = false;
+            for (auto const& e : out) if (equal(std::get<0>(e), k)) dup = true;
+            if (dup) continue;
+            insert_into(out, std::move(k), generate<map_mapped_t<T>>(g));
+        }
         --g.depth;
         return out;
     }
@@ -189,11 +196,19 @@ bool equal(T const& a, T const& b) {
         return true;
     }
     else if constexpr (map_like<T>) {
-        // A range of pairs keeps order and may repeat keys: compare in order.
+        // A range of pairs may be reordered by a format that sorts map keys (deterministic
+        // CBOR); compare as multisets of entries.
         if (std::ranges::distance(a) != std::ranges::distance(b)) return false;
-        auto ia = std::ranges::begin(a); auto ib = std::ranges::begin(b);
-        for (; ia != std::ranges::end(a); ++ia, ++ib)
-            if (!equal(std::get<0>(*ia), std::get<0>(*ib)) || !equal(std::get<1>(*ia), std::get<1>(*ib))) return false;
+        std::vector<bool> used(static_cast<std::size_t>(std::ranges::distance(b)), false);
+        for (auto const& ea : a) {
+            bool found = false;
+            std::size_t i = 0;
+            for (auto const& eb : b) {
+                if (!used[i] && equal(std::get<0>(ea), std::get<0>(eb)) && equal(std::get<1>(ea), std::get<1>(eb))) { used[i] = true; found = true; break; }
+                ++i;
+            }
+            if (!found) return false;
+        }
         return true;
     }
     else if constexpr (fixed_array<T> || sequence<T>) {

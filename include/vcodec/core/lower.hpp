@@ -94,6 +94,40 @@ inline bool hex_decode(std::string_view in, std::vector<std::byte>& out) {
     return true;
 }
 
+// ---- UTF-8 ------------------------------------------------------------------------------------
+
+inline constexpr std::size_t utf8_npos = static_cast<std::size_t>(-1);
+
+// Returns utf8_npos if `s` is well-formed UTF-8 (RFC 3629: no overlongs, no surrogates,
+// nothing above U+10FFFF), otherwise the byte offset of the first invalid sequence.
+constexpr std::size_t validate_utf8(std::string_view s) noexcept {
+    std::size_t i = 0, n = s.size();
+    while (i < n) {
+        unsigned char c = static_cast<unsigned char>(s[i]);
+        if (c < 0x80) { ++i; continue; }
+        auto cont = [&](std::size_t k) { return i + k < n && (static_cast<unsigned char>(s[i + k]) & 0xC0) == 0x80; };
+        if (c >= 0xC2 && c <= 0xDF) {
+            if (!cont(1)) return i;
+            i += 2;
+        } else if (c >= 0xE0 && c <= 0xEF) {
+            if (!cont(1) || !cont(2)) return i;
+            unsigned char c1 = static_cast<unsigned char>(s[i + 1]);
+            if (c == 0xE0 && c1 < 0xA0) return i;          // overlong
+            if (c == 0xED && c1 >= 0xA0) return i;         // surrogate
+            i += 3;
+        } else if (c >= 0xF0 && c <= 0xF4) {
+            if (!cont(1) || !cont(2) || !cont(3)) return i;
+            unsigned char c1 = static_cast<unsigned char>(s[i + 1]);
+            if (c == 0xF0 && c1 < 0x90) return i;          // overlong
+            if (c == 0xF4 && c1 >= 0x90) return i;         // > U+10FFFF
+            i += 4;
+        } else {
+            return i;
+        }
+    }
+    return utf8_npos;
+}
+
 // ---- IEEE 754 binary16 ---------------------------------------------------------------------
 // Exact conversions with round-to-nearest-even. Used by CBOR preferred float serialization.
 
@@ -130,6 +164,29 @@ constexpr std::optional<std::uint16_t> to_half(double d) noexcept {
     double m = std::ldexp(a, 24);
     if (m != static_cast<double>(static_cast<std::uint32_t>(m)) || m >= 1024.0) return std::nullopt;
     return static_cast<std::uint16_t>(sign | static_cast<std::uint32_t>(m));
+}
+
+// Nearest half (round to nearest even), for a pinned half width. Overflows to infinity.
+constexpr std::uint16_t to_half_rounded(double d) noexcept {
+    if (auto h = to_half(d)) return *h;
+    std::uint16_t sign = std::signbit(d) ? 0x8000 : 0;
+    double a = std::fabs(d);
+    if (a >= 65520.0) return static_cast<std::uint16_t>(sign | 0x7C00);
+    int exp = 0;
+    double frac = std::frexp(a, &exp);
+    int e = exp - 1 + 15;
+    double scaled; std::uint32_t mant; unsigned ee;
+    if (e >= 1) { scaled = frac * 2048.0; ee = static_cast<unsigned>(e); }
+    else        { scaled = std::ldexp(a, 24) + 1024.0; ee = 0; }   // subnormal: bias so the rounding below is uniform
+    double fl = std::floor(scaled);
+    double diff = scaled - fl;
+    mant = static_cast<std::uint32_t>(fl);
+    if (diff > 0.5 || (diff == 0.5 && (mant & 1))) ++mant;
+    if (ee == 0) { mant -= 1024; if (mant >= 1024) { mant -= 1024; ee = 1; } }
+    else if (mant >= 2048) { mant -= 1024; ++ee; if (ee >= 31) return static_cast<std::uint16_t>(sign | 0x7C00); }
+    mant &= 0x3FF;
+    if (ee == 0) return static_cast<std::uint16_t>(sign | mant);
+    return static_cast<std::uint16_t>(sign | (ee << 10) | mant);
 }
 
 // Does the double survive a round trip through float?

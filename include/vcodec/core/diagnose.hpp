@@ -170,7 +170,10 @@ consteval void audit_type(audit_state& st, std::string path) {
             return;
         }
         if (st.dir == direction::decode) {
-            if constexpr (span_like<B>) { st.fail(msg_encode_only(path, type_str(^^B), "std::vector<std::byte>")); return; }
+            if constexpr (span_like<B>) {
+                if constexpr (format_traits<Format>::bytes_borrowable) { st.borrows = true; return; }
+                st.fail(msg_encode_only(path, type_str(^^B), "std::vector<std::byte>")); return;
+            }
             else if constexpr (!std_array<B> && !requires(B& b) { b.assign(b.begin(), b.end()); } && !requires(B& b) { b.push_back(*b.begin()); }) {
                 st.fail(msg_encode_only(path, type_str(^^B), "std::vector<std::byte>")); return;
             }

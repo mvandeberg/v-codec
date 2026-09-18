@@ -59,6 +59,14 @@ template<field_meta F, sink S>
 void call_bytes(S& s, std::span<const std::byte> b) {
     if constexpr (requires { s.template bytes<F>(b); }) s.template bytes<F>(b); else s.bytes(b);
 }
+template<field_meta F, sink S>
+void call_real(S& s, double d) {
+    if constexpr (requires { s.template real<F>(d); }) s.template real<F>(d); else s.real(d);
+}
+template<field_meta F, sink S>
+void call_text(S& s, std::string_view t) {
+    if constexpr (requires { s.template text<F>(t); }) s.template text<F>(t); else s.text(t);
+}
 // Key emission: a sink may precompute the key's wire form from the static name (one memcpy).
 template<static_string Name, sink S>
 void emit_key(S& s) {
@@ -71,9 +79,9 @@ void emit_int_key(S& s) {
     else s.key(Key);
 }
 // Tags a format expects before a member's value (from format_traits::expected_tags).
-template<field_meta F, sink S>
+template<field_meta F, class T, sink S>
 void emit_tags(S& s) {
-    constexpr auto tags = expected_tags_of<F, format_of<S>>;
+    constexpr auto tags = expected_tags_of<F, T, format_of<S>>;
     if constexpr (!tags.empty()) for (auto t : tags) s.tag(t);
 }
 
@@ -100,12 +108,19 @@ VCODEC_ALWAYS_INLINE void with_key_path(std::string_view k, Fn&& fn) {
 template<field_meta F, sink S, enum_type E>
 void encode_enum(S& s, E v) {
     using U = std::underlying_type_t<E>;
+    constexpr auto table = enum_schema_of<E>;
     if constexpr (enum_encodes_as_integer<E, F, format_traits<format_of<S>>::enum_default_integer>) {
+        for (auto const& e : table) {
+            if (e.value == v && e.skipped) {
+                std::string msg = "enumerator '"; msg += e.identifier.view();
+                msg += "' of "; msg += type_schema_name<E>(); msg += " is marked [[=vcodec::skip]] and cannot be encoded";
+                throw encode_error(errc::unknown_enumerator, std::move(msg));
+            }
+        }
         if constexpr (std::is_signed_v<U>) call_sint<F>(s, static_cast<std::int64_t>(static_cast<U>(v)));
         else                               call_uint<F>(s, static_cast<std::uint64_t>(static_cast<U>(v)));
         return;
     }
-    constexpr auto table = enum_schema_of<E>;
     for (auto const& e : table) {
         if (e.value != v) continue;
         if (e.skipped) {
@@ -138,7 +153,7 @@ void encode_field_value(S& s, M const& m) {
     if constexpr (optional_like<M>) {
         if (m) encode_field_value<F>(s, *m); else s.null();
     } else {
-        emit_tags<F>(s);
+        emit_tags<F, M>(s);
         if constexpr (format_traits<format_of<S>>::template bulk_range<F, M>()
                       && requires { s.template write_range<F>(m); }) {
             s.template write_range<F>(m);
@@ -207,8 +222,12 @@ void encode_struct(S& s, T const& v, std::string_view tag_key = {}, std::string_
         }
         n = k;
     }
-    // A struct's members arrive in the format's own order: a sink that sorts maps may skip it.
-    if constexpr (requires { s.begin_map_ordered(n); }) s.begin_map_ordered(n); else s.begin_map(n);
+    // A struct's members arrive in the format's own order, so a sink that sorts maps may skip
+    // it — except when a discriminator entry is spliced in, whose place in that order is only
+    // known at runtime; then the sink sorts.
+    if (!tag_key.empty()) s.begin_map(n);
+    else if constexpr (requires { s.begin_map_ordered(n); }) s.begin_map_ordered(n);
+    else s.begin_map(n);
     if (!tag_key.empty()) { s.key(tag_key); s.text(tag_value); }
     encode_members(s, v);
     s.end_map();
@@ -298,9 +317,12 @@ void encode_value(S& s, T const& v) {
     using Fmt = format_of<S>;
     if constexpr (F.codec != ^^void) {
         using Codec = typename [:F.codec:];
-        Codec::encode(s, v);
+        if constexpr (requires { Codec::template encode<F>(s, v); }) Codec::template encode<F>(s, v);
+        else Codec::encode(s, v);
     } else if constexpr (has_codec_for<T, Fmt>) {
-        codec_for_t<T, Fmt>::encode(s, v);
+        using Codec = codec_for_t<T, Fmt>;
+        if constexpr (requires { Codec::template encode<F>(s, v); }) Codec::template encode<F>(s, v);
+        else Codec::encode(s, v);
     } else if constexpr (requires { s.template write_prepared<T>(v); }) {
         s.template write_prepared<T>(v);
     } else if constexpr (boolean_type<T>) {
@@ -312,11 +334,11 @@ void encode_value(S& s, T const& v) {
     } else if constexpr (signed_integral_type<T>) {
         call_sint<F>(s, static_cast<std::int64_t>(v));
     } else if constexpr (floating_type<T>) {
-        s.real(static_cast<double>(v));
+        call_real<F>(s, static_cast<double>(v));
     } else if constexpr (enum_type<T>) {
         encode_enum<F>(s, v);
     } else if constexpr (string_like<T>) {
-        s.text(to_string_view(v));
+        call_text<F>(s, to_string_view(v));
     } else if constexpr (optional_like<T>) {
         if (v) encode_value<F>(s, *v); else s.null();
     } else if constexpr (variant_like<T>) {

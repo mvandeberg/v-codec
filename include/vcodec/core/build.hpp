@@ -199,7 +199,16 @@ status decode_bytes(R& r, T& out) {
     auto b = call_expect_bytes<F>(r);
     if (!b) return fail(std::move(b));
     auto const& bytes = b->bytes;
-    if constexpr (std_array<T>) {
+    if constexpr (span_like<T>) {
+        // Borrowing (§7.4): a span can only alias the input buffer.
+        if (!b->borrowed) {
+            constexpr field_info fi = F.info;
+            return std::unexpected(r.error(errc::indefinite_in_borrowed_string, off)
+                .with_context(F.depth ? fi.qualified.view() : type_display<T>())
+                .with_suggestion("use std::vector<std::byte> instead of std::span<const std::byte>"));
+        }
+        out = T(bytes.data(), bytes.size());
+    } else if constexpr (std_array<T>) {
         if (bytes.size() != out.size())
             return std::unexpected(r.error(errc::type_mismatch, off)
                 .with_expected("byte string of length " + std::to_string(out.size()))
@@ -479,12 +488,15 @@ status decode_field_value(R& r, M& m) {
         auto& v = emplace_value(m);
         return decode_field_value<F>(r, v);
     } else {
-        constexpr auto tags = expected_tags_of<F, format_of<R>>;
+        constexpr auto tags = expected_tags_of<F, M, format_of<R>>;
         if constexpr (!tags.empty()) {
             auto st = r.expect_tags(tags);
-            if (!st) return st;
+            if (!st) {
+                if constexpr (F.depth > 0) { constexpr field_info fi = F.info; if (st.error().code() == errc::tag_mismatch) st.error().with_context(fi.identifier.view()); }
+                return st;
+            }
         }
-        if constexpr (format_traits<format_of<R>>::template bulk_range<F, M>()
+        if constexpr ((format_traits<format_of<R>>::template bulk_range<F, M>() || format_traits<format_of<R>>::template accepts_bulk_range<M>())
                       && requires { { r.template read_range<F>(m) } -> std::same_as<result<bool>>; }) {
             auto handled = r.template read_range<F>(m);
             if (!handled) return fail(std::move(handled));
@@ -497,6 +509,29 @@ status decode_field_value(R& r, M& m) {
 template<field_meta F, reader R, class T>
 status decode_field(R& r, T& out) {
     return decode_field_value<F>(r, access<F>(out));
+}
+
+// Error path only: re-scan a map to list the keys it contains (rendered by the CBOR hex
+// renderer as "keys present: 2, 4, 7"). Position is restored afterwards.
+template<reader R>
+void describe_present_keys(R& r, std::size_t obj_save, error& e) {
+    std::size_t here = r.save();
+    r.restore(obj_save);
+    auto c = r.expect_map();
+    std::size_t count = 0;
+    if (c) {
+        for (;;) {
+            auto more = c->next(); if (!more || !*more) break;
+            kind kk = c->key_kind();
+            if (kk == kind::uint) { auto k = c->key_uint(); if (!k) break; e.with_candidate(decimal(*k)); }
+            else if (kk == kind::sint) { auto k = c->key_sint(); if (!k) break; e.with_candidate(decimal(*k)); }
+            else { auto k = c->key_text(); if (!k) break; e.with_candidate("\"" + std::string(k->text) + "\""); }
+            ++count;
+            if (!r.skip_value()) break;
+        }
+    }
+    e.with_found(decimal(static_cast<std::uint64_t>(count)));
+    r.restore(here);
 }
 
 // Decodes an object into a struct. `ignore_key` is the discriminator to skip when the struct
@@ -521,6 +556,7 @@ status decode_struct(R& r, T& out, std::string_view ignore_key = {}) {
     }
 
     std::size_t obj_off = r.offset();
+    std::size_t obj_save = r.save();
     auto c = r.expect_map();
     if (!c) return fail(std::move(c));
     std::bitset<N ? N : 1> seen;
@@ -562,6 +598,9 @@ status decode_struct(R& r, T& out, std::string_view ignore_key = {}) {
             if (!kt) return fail(std::move(kt));
             key = kt->text;
             idx = lut.find(key);
+            // A member keyed by an integer under this format takes its text name only when
+            // the format says so (cbor::text_key_alias).
+            if constexpr (ikeys.any()) { if (idx != npos && ikeys.keys[idx].present && !ikeys.keys[idx].text_ok) idx = npos; }
         }
 
         if (idx == npos) {
@@ -653,6 +692,7 @@ status decode_struct(R& r, T& out, std::string_view ignore_key = {}) {
                         error e = r.error(errc::missing_field, obj_off).with_detail(fi.wire_name.view())
                                       .with_container_offset(obj_off).with_context(ti.name.view());
                         if constexpr (ikeys.any()) { if (ikeys.keys[fi.member_index].present) e.with_expected(decimal(ikeys.keys[fi.member_index].value)); }
+                        describe_present_keys(r, obj_save, e);
                         if constexpr (collecting<R>) r.collected().push_back(std::move(e));
                         else missing = std::unexpected(std::move(e));
                     }
@@ -776,6 +816,15 @@ status decode_variant(R& r, V& out) {
     return result;
 }
 
+// A codec's decode: field-aware or not, into-parameter or by-value.
+template<class Codec, field_meta F, reader R, class T>
+status run_codec_decode(R& r, T& out) {
+    if constexpr (requires { { Codec::template decode<F>(r, out) } -> std::same_as<status>; }) return Codec::template decode<F>(r, out);
+    else if constexpr (requires { { Codec::decode(r, out) } -> std::same_as<status>; }) return Codec::decode(r, out);
+    else if constexpr (requires { Codec::template decode<F>(r); }) { auto v = Codec::template decode<F>(r); if (!v) return fail(std::move(v)); out = std::move(*v); return {}; }
+    else { auto v = Codec::decode(r); if (!v) return fail(std::move(v)); out = std::move(*v); return {}; }
+}
+
 // ---- dispatch ------------------------------------------------------------------------------
 
 template<field_meta F, reader R, class T>
@@ -783,12 +832,10 @@ status decode_value(R& r, T& out) {
     using Fmt = format_of<R>;
     if constexpr (F.codec != ^^void) {
         using Codec = typename [:F.codec:];
-        if constexpr (requires { { Codec::decode(r, out) } -> std::same_as<status>; }) return Codec::decode(r, out);
-        else { auto v = Codec::decode(r); if (!v) return fail(std::move(v)); out = std::move(*v); return {}; }
+        return run_codec_decode<Codec, F>(r, out);
     } else if constexpr (has_codec_for<T, Fmt>) {
         using Codec = codec_for_t<T, Fmt>;
-        if constexpr (requires { { Codec::decode(r, out) } -> std::same_as<status>; }) return Codec::decode(r, out);
-        else { auto v = Codec::decode(r); if (!v) return fail(std::move(v)); out = std::move(*v); return {}; }
+        return run_codec_decode<Codec, F>(r, out);
     } else if constexpr (boolean_type<T>) {
         auto b = r.expect_boolean(); if (!b) return fail(std::move(b)); out = *b; return {};
     } else if constexpr (char_type<T>) {

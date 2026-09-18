@@ -28,9 +28,9 @@ jobs:
       - name: Configure
         run: |
           if [ "${{ matrix.build }}" = "ASan+UBSan" ]; then
-            cmake -S . -B build -G Ninja -DCMAKE_BUILD_TYPE=Debug -DVCODEC_SANITIZE=ON -DVCODEC_BUILD_SPIKE=ON
+            cmake -S . -B build -G Ninja -DCMAKE_BUILD_TYPE=Debug -DVCODEC_SANITIZE=ON
           else
-            cmake -S . -B build -G Ninja -DCMAKE_BUILD_TYPE=${{ matrix.build }} -DVCODEC_BUILD_SPIKE=ON
+            cmake -S . -B build -G Ninja -DCMAKE_BUILD_TYPE=${{ matrix.build }}
           fi
       - name: Build
         run: ninja -C build

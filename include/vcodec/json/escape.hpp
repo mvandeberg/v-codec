@@ -4,6 +4,7 @@
 
 #include <vcodec/core/compiler.hpp>
 #include <vcodec/core/fixed_string.hpp>
+#include <vcodec/core/lower.hpp>
 #include <vcodec/error.hpp>
 
 #include <cstddef>
@@ -15,37 +16,10 @@
 
 namespace vcodec::json {
 
-inline constexpr std::size_t npos = static_cast<std::size_t>(-1);
+inline constexpr std::size_t npos = core::utf8_npos;
 
-// Returns npos if `s` is well-formed UTF-8 (RFC 3629: no overlongs, no surrogates, nothing
-// above U+10FFFF), otherwise the byte offset of the first invalid sequence.
-constexpr std::size_t validate_utf8(std::string_view s) noexcept {
-    std::size_t i = 0, n = s.size();
-    while (i < n) {
-        unsigned char c = static_cast<unsigned char>(s[i]);
-        if (c < 0x80) { ++i; continue; }
-        auto cont = [&](std::size_t k) { return i + k < n && (static_cast<unsigned char>(s[i + k]) & 0xC0) == 0x80; };
-        if (c >= 0xC2 && c <= 0xDF) {
-            if (!cont(1)) return i;
-            i += 2;
-        } else if (c >= 0xE0 && c <= 0xEF) {
-            if (!cont(1) || !cont(2)) return i;
-            unsigned char c1 = static_cast<unsigned char>(s[i + 1]);
-            if (c == 0xE0 && c1 < 0xA0) return i;          // overlong
-            if (c == 0xED && c1 >= 0xA0) return i;         // surrogate
-            i += 3;
-        } else if (c >= 0xF0 && c <= 0xF4) {
-            if (!cont(1) || !cont(2) || !cont(3)) return i;
-            unsigned char c1 = static_cast<unsigned char>(s[i + 1]);
-            if (c == 0xF0 && c1 < 0x90) return i;          // overlong
-            if (c == 0xF4 && c1 >= 0x90) return i;         // > U+10FFFF
-            i += 4;
-        } else {
-            return i;
-        }
-    }
-    return npos;
-}
+// UTF-8 validation lives in core/lower.hpp; this alias keeps the v0.1 spelling.
+using core::validate_utf8;
 
 namespace detail {
 inline constexpr char hex_upper[] = "0123456789ABCDEF";

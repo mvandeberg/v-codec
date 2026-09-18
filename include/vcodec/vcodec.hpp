@@ -13,5 +13,13 @@
 #include <vcodec/core/traverse.hpp>
 #include <vcodec/core/build.hpp>
 #include <vcodec/json.hpp>
+#include <vcodec/cbor.hpp>
+
+namespace vcodec {
+// §11 rule 2 stated in one line: a type that supports one format and fails at compile time
+// under the other.
+template<class T> concept cbor_only = cbor::encodable<T> && cbor::decodable<T> && !json::encodable<T>;
+template<class T> concept json_only = json::encodable<T> && json::decodable<T> && !cbor::encodable<T>;
+}
 
 #endif // VCODEC_VCODEC_HPP

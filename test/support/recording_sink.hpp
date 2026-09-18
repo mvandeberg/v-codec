@@ -93,7 +93,7 @@ struct vcodec::core::format_traits<vcodec_test::mock_format> : vcodec::core::for
         if (has_annotation<vcodec_test::reversed_t>(detail::type_annotations_of<T>())) std::reverse(v.begin(), v.end());
         return v;
     }
-    template<field_meta F>
+    template<field_meta F, class T>
     static consteval std::vector<std::uint64_t> expected_tags() {
         std::vector<std::uint64_t> v;
         for (auto a : F.anns()) if (is_annotation_of_type(a, ^^vcodec_test::tag_marker_t)) v.push_back(std::meta::extract<vcodec_test::tag_marker_t>(a).tag);
